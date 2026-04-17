@@ -1,21 +1,24 @@
 const https = require("https");
+const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
+const PORT = process.env.PORT || 3000;
 
 const PRIVATE_CHAT_ID = "978193902";
 const CHANNEL_CHAT_ID = "-1003675505328";
 
 const TIMEZONE = "Europe/Kyiv";
-const SCHEDULE_TIMES = ["11:00", "14:00", "19:05"];
+const SCHEDULE_TIMES = ["11:00", "14:00", "18:00"];
 const MAX_ATTEMPTS_PER_SLOT = 5;
 const NEWS_PAGE_SIZE = 15;
 const STATE_FILE = path.join(__dirname, "bot_state.json");
 
 let lastUpdateId = 0;
 let currentSlot = null;
+let currentDraft = null;
 
 const state = loadState();
 
@@ -162,6 +165,16 @@ function getKyivDateTime() {
     dateKey: `${map.year}-${map.month}-${map.day}`,
     timeLabel: `${map.hour}:${map.minute}`,
   };
+}
+
+function sendJson(res, code, payload) {
+  res.writeHead(code, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  });
+  res.end(JSON.stringify(payload));
 }
 
 /* ================= REQUEST ================= */
@@ -350,6 +363,7 @@ async function sendDraft() {
     currentSlot.completed = true;
     markSlotProcessed(currentSlot.slotKey);
     currentSlot = null;
+    currentDraft = null;
     return;
   }
 
@@ -369,6 +383,7 @@ async function sendDraft() {
     currentSlot.completed = true;
     markSlotProcessed(currentSlot.slotKey);
     currentSlot = null;
+    currentDraft = null;
     return;
   }
 
@@ -381,6 +396,7 @@ async function sendDraft() {
     currentSlot.completed = true;
     markSlotProcessed(currentSlot.slotKey);
     currentSlot = null;
+    currentDraft = null;
     return;
   }
 
@@ -399,6 +415,17 @@ async function sendDraft() {
   currentSlot.pendingId = draftId;
   currentSlot.article = article;
   currentSlot.text = text;
+
+  currentDraft = {
+    id: draftId,
+    title: article.title,
+    description: article.description,
+    text,
+    url: article.url,
+    slotKey: currentSlot.slotKey,
+    createdAt: new Date().toISOString(),
+    status: "pending",
+  };
 
   await sendMessage(PRIVATE_CHAT_ID, text, [
     { text: "✅ Опублікувати", callback_data: "publish|" + draftId },
@@ -442,6 +469,11 @@ async function handleUpdates() {
           await removeInlineButtons(callback.message.chat.id, callback.message.message_id);
         }
 
+        if (currentDraft) {
+          currentDraft.status = "published";
+          currentDraft.publishedAt = new Date().toISOString();
+        }
+
         currentSlot.completed = true;
         markSlotProcessed(currentSlot.slotKey);
         currentSlot = null;
@@ -460,6 +492,11 @@ async function handleUpdates() {
           await removeInlineButtons(callback.message.chat.id, callback.message.message_id);
         }
 
+        if (currentDraft) {
+          currentDraft.status = "rejected";
+          currentDraft.rejectedAt = new Date().toISOString();
+        }
+
         currentSlot.pendingId = null;
         currentSlot.article = null;
         currentSlot.text = null;
@@ -472,6 +509,40 @@ async function handleUpdates() {
     }
   }
 }
+
+/* ================= API ================= */
+
+const apiServer = http.createServer(async (req, res) => {
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    });
+    res.end();
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/") {
+    return sendJson(res, 200, {
+      ok: true,
+      service: "ai-telegram-bot",
+      endpoints: ["/draft/current"],
+    });
+  }
+
+  if (req.method === "GET" && req.url === "/draft/current") {
+    return sendJson(res, 200, {
+      ok: true,
+      draft: currentDraft,
+    });
+  }
+
+  return sendJson(res, 404, {
+    ok: false,
+    error: "Not found",
+  });
+});
 
 /* ================= SCHEDULER ================= */
 
@@ -522,6 +593,10 @@ async function bootstrap() {
   console.log("Bot started");
   console.log("Schedule:", SCHEDULE_TIMES.join(", "));
   console.log("Timezone:", TIMEZONE);
+
+  apiServer.listen(PORT, () => {
+    console.log(`API server started on port ${PORT}`);
+  });
 
   setInterval(() => {
     handleUpdates().catch((error) => {
