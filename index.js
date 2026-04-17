@@ -48,7 +48,7 @@ const sendMessageWithButtons = (chatId, text) => {
 
 console.log("Bot started");
 
-// ТЕСТ — відправка тобі з кнопками
+// тест — надсилає тобі в особисті
 setTimeout(() => {
-  sendMessageWithButtons("-1003675505328", "📰 Нова новина:\n\nТут буде текст від ІІ");
+  sendMessageWithButtons("978193902", "📰 Нова новина:\n\nТут буде текст від ІІ");
 }, 5000);
