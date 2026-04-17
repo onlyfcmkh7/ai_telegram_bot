@@ -11,7 +11,7 @@ const PRIVATE_CHAT_ID = "978193902";
 const CHANNEL_CHAT_ID = "-1003675505328";
 
 const TIMEZONE = "Europe/Kyiv";
-const SCHEDULE_TIMES = ["11:00", "14:00", "22:49"];
+const SCHEDULE_TIMES = ["11:00", "14:00", "22:54"];
                        
 const MAX_ATTEMPTS_PER_SLOT = 5;
 const NEWS_PAGE_SIZE = 15;
