@@ -90,8 +90,6 @@ const getCryptoNews = async () => {
     "GET"
   );
 
-  console.log("NEWS RESULT:", JSON.stringify(result));
-
   if (!result.articles || !result.articles.length) {
     throw new Error("No crypto news found");
   }
@@ -105,8 +103,25 @@ const getCryptoNews = async () => {
   };
 };
 
-const buildDraftText = (article) => {
-  return `📰 Крипто-новина:\n\n${article.title}\n\n${article.description}\n\nДжерело: ${article.url}`;
+// 🔥 ПЕРЕКЛАД
+const translateToUkrainian = async (text) => {
+  const query = encodeURIComponent(text);
+
+  const result = await sendRequest(
+    "api.mymemory.translated.net",
+    `/get?q=${query}&langpair=en|uk`,
+    null,
+    "GET"
+  );
+
+  return result.responseData?.translatedText || text;
+};
+
+const buildDraftText = async (article) => {
+  const title = await translateToUkrainian(article.title);
+  const description = await translateToUkrainian(article.description);
+
+  return `📰 Крипто-новина:\n\n${title}\n\n${description}\n\nДжерело: ${article.url}`;
 };
 
 const handleUpdates = async () => {
@@ -137,7 +152,7 @@ const handleUpdates = async () => {
 
 const sendCryptoDraftToPrivate = async () => {
   const article = await getCryptoNews();
-  const draftText = buildDraftText(article);
+  const draftText = await buildDraftText(article);
 
   await sendMessage(PRIVATE_CHAT_ID, draftText, [
     { text: "✅ Опублікувати", callback_data: "publish" },
