@@ -11,10 +11,10 @@ const PRIVATE_CHAT_ID = "978193902";
 const CHANNEL_CHAT_ID = "-1003675505328";
 
 const TIMEZONE = "Europe/Kyiv";
-const SCHEDULE_TIMES = ["11:00", "14:00", "22:58"];
-                       
+const SCHEDULE_TIMES = ["11:00", "14:00", "18:00"];
+
 const MAX_ATTEMPTS_PER_SLOT = 5;
-const NEWS_PAGE_SIZE = 15;
+const NEWS_PAGE_SIZE = 30;
 const STATE_FILE = path.join(__dirname, "bot_state.json");
 
 let lastUpdateId = 0;
@@ -142,6 +142,35 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
+function stripHtml(text) {
+  return String(text || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function shorten(text, maxLength = 220) {
+  const cleaned = stripHtml(text);
+  if (!cleaned) return "";
+
+  if (cleaned.length <= maxLength) return cleaned;
+
+  const sliced = cleaned.slice(0, maxLength);
+  const lastSpace = sliced.lastIndexOf(" ");
+
+  if (lastSpace > 120) {
+    return `${sliced.slice(0, lastSpace)}…`;
+  }
+
+  return `${sliced}…`;
+}
+
+function cleanupTitle(text) {
+  return stripHtml(text)
+    .replace(/\s*[-–|]\s*[^-–|]+$/, "")
+    .trim();
+}
+
 function getKyivDateTime() {
   const formatter = new Intl.DateTimeFormat("en-CA", {
     timeZone: TIMEZONE,
@@ -175,7 +204,26 @@ function sendJson(res, code, payload) {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   });
+
   res.end(JSON.stringify(payload));
+}
+
+function parseRequestBody(req) {
+  return new Promise((resolve) => {
+    let body = "";
+
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+
+    req.on("end", () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch {
+        resolve({});
+      }
+    });
+  });
 }
 
 /* ================= REQUEST ================= */
@@ -278,10 +326,100 @@ const removeInlineButtons = async (chatId, messageId) => {
   }
 };
 
+/* ================= NEWS FILTER ================= */
+
+const POSITIVE_KEYWORDS = [
+  "crypto",
+  "cryptocurrency",
+  "bitcoin",
+  "btc",
+  "ethereum",
+  "eth",
+  "solana",
+  "sol",
+  "binance",
+  "coinbase",
+  "blockchain",
+  "web3",
+  "defi",
+  "stablecoin",
+  "stablecoins",
+  "token",
+  "tokens",
+  "altcoin",
+  "altcoins",
+  "etf",
+  "xrp",
+  "dogecoin",
+  "ton",
+  "tron",
+  "kraken",
+  "metamask",
+];
+
+const NEGATIVE_KEYWORDS = [
+  "app store",
+  "iphone",
+  "ios",
+  "android app",
+  "virus protection",
+  "scammer",
+  "scam app",
+  "anthropic",
+  "claude",
+  "pypi",
+  "sdk",
+  "railroad commissioner",
+  "iran",
+  "lebanon",
+  "hezbollah",
+  "ceasefire",
+  "uranium",
+  "import prices",
+  "biden pardons",
+  "doha",
+  "trump dismisses",
+];
+
+function scoreArticle(article) {
+  const haystack = `${article.title || ""} ${article.description || ""}`.toLowerCase();
+  let score = 0;
+
+  for (const word of POSITIVE_KEYWORDS) {
+    if (haystack.includes(word)) score += 2;
+  }
+
+  for (const word of NEGATIVE_KEYWORDS) {
+    if (haystack.includes(word)) score -= 5;
+  }
+
+  if (haystack.includes("bitcoin")) score += 3;
+  if (haystack.includes("ethereum")) score += 3;
+  if (haystack.includes("crypto")) score += 3;
+  if (haystack.includes("blockchain")) score += 2;
+  if (haystack.includes("etf")) score += 2;
+
+  return score;
+}
+
+function isGoodCryptoArticle(article) {
+  const haystack = `${article.title || ""} ${article.description || ""}`.toLowerCase();
+
+  const hasPositive = POSITIVE_KEYWORDS.some((word) => haystack.includes(word));
+  const hasNegative = NEGATIVE_KEYWORDS.some((word) => haystack.includes(word));
+
+  if (!hasPositive) return false;
+  if (hasNegative) return false;
+
+  return scoreArticle(article) >= 4;
+}
+
 /* ================= NEWS ================= */
 
 const getNews = async () => {
-  const query = encodeURIComponent("(crypto OR bitcoin OR ethereum OR blockchain)");
+  const query = encodeURIComponent(
+    '(crypto OR cryptocurrency OR bitcoin OR ethereum OR blockchain OR "crypto market" OR ETF)'
+  );
 
   const result = await sendRequest(
     "newsapi.org",
@@ -301,13 +439,20 @@ const getNews = async () => {
     throw new Error(message);
   }
 
-  return result.articles
+  const normalized = result.articles
     .filter((a) => a && a.url && a.title)
     .map((a) => ({
-      title: a.title || "Без заголовка",
-      description: a.description || "Опис відсутній",
+      title: cleanupTitle(a.title || "Без заголовка"),
+      description: stripHtml(a.description || ""),
       url: normalizeUrl(a.url || ""),
-    }));
+      publishedAt: a.publishedAt || "",
+      sourceName: a.source?.name || "",
+      score: scoreArticle(a),
+    }))
+    .filter(isGoodCryptoArticle)
+    .sort((a, b) => b.score - a.score);
+
+  return normalized;
 };
 
 const getNextUniqueArticle = async () => {
@@ -334,7 +479,7 @@ const translate = async (text) => {
       "GET"
     );
 
-    return res?.responseData?.translatedText || source;
+    return stripHtml(res?.responseData?.translatedText || source);
   } catch (error) {
     console.error("translate error:", error);
     return source;
@@ -344,23 +489,39 @@ const translate = async (text) => {
 /* ================= FORMAT ================= */
 
 const buildText = async (article) => {
-  const title = await translate(article.title);
-  const desc = await translate(article.description);
+  const translatedTitle = await translate(article.title);
+  let translatedDesc = "";
 
-  return `<b>${escapeHtml(title)}</b>\n\n${escapeHtml(desc || "")}`;
+  if (article.description) {
+    translatedDesc = await translate(shorten(article.description, 180));
+  }
+
+  const safeTitle = escapeHtml(cleanupTitle(translatedTitle || article.title));
+  const safeDesc = escapeHtml(shorten(translatedDesc || article.description || "", 200));
+
+  if (!safeDesc) {
+    return `<b>${safeTitle}</b>`;
+  }
+
+  return `<b>${safeTitle}</b>\n\n${safeDesc}`;
 };
 
 /* ================= SLOT ================= */
 
-async function sendDraft() {
+async function sendDraft(options = {}) {
   if (!currentSlot) return;
   if (currentSlot.completed) return;
 
+  const silent = !!options.silent;
+
   if (currentSlot.attempts >= MAX_ATTEMPTS_PER_SLOT) {
-    await sendMessage(
-      PRIVATE_CHAT_ID,
-      `⚠️ Ліміт спроб для слота ${currentSlot.timeLabel} вичерпано. Чекаю наступного слота.`
-    );
+    if (!silent) {
+      await sendMessage(
+        PRIVATE_CHAT_ID,
+        `⚠️ Ліміт спроб для слота ${currentSlot.timeLabel} вичерпано. Чекаю наступного слота.`
+      );
+    }
+
     currentSlot.completed = true;
     markSlotProcessed(currentSlot.slotKey);
     currentSlot = null;
@@ -376,10 +537,12 @@ async function sendDraft() {
   } catch (error) {
     console.error("getNextUniqueArticle error:", error);
 
-    await sendMessage(
-      PRIVATE_CHAT_ID,
-      `⚠️ Не вдалося отримати новину: ${escapeHtml(error.message)}`
-    );
+    if (!silent) {
+      await sendMessage(
+        PRIVATE_CHAT_ID,
+        `⚠️ Не вдалося отримати новину: ${escapeHtml(error.message)}`
+      );
+    }
 
     currentSlot.completed = true;
     markSlotProcessed(currentSlot.slotKey);
@@ -389,10 +552,12 @@ async function sendDraft() {
   }
 
   if (!article) {
-    await sendMessage(
-      PRIVATE_CHAT_ID,
-      `⚠️ Унікальних новин не знайдено для слота ${currentSlot.timeLabel}.`
-    );
+    if (!silent) {
+      await sendMessage(
+        PRIVATE_CHAT_ID,
+        `⚠️ Якісних унікальних крипто-новин не знайдено для слота ${currentSlot.timeLabel}.`
+      );
+    }
 
     currentSlot.completed = true;
     markSlotProcessed(currentSlot.slotKey);
@@ -408,7 +573,7 @@ async function sendDraft() {
     text = await buildText(article);
   } catch (error) {
     console.error("buildText error:", error);
-    text = `<b>${escapeHtml(article.title)}</b>\n\n${escapeHtml(article.description || "")}`;
+    text = `<b>${escapeHtml(article.title)}</b>\n\n${escapeHtml(shorten(article.description || "", 180))}`;
   }
 
   const draftId = nextDraftId();
@@ -528,7 +693,7 @@ const apiServer = http.createServer(async (req, res) => {
     return sendJson(res, 200, {
       ok: true,
       service: "ai-telegram-bot",
-      endpoints: ["/draft/current"],
+      endpoints: ["/draft/current", "/draft/test"],
     });
   }
 
@@ -537,6 +702,76 @@ const apiServer = http.createServer(async (req, res) => {
       ok: true,
       draft: currentDraft,
     });
+  }
+
+  if (req.method === "GET" && req.url === "/draft/test") {
+    try {
+      currentSlot = {
+        slotKey: "manual_test_slot",
+        dateKey: "manual_test_date",
+        timeLabel: "TEST",
+        attempts: 0,
+        completed: false,
+        pendingId: null,
+        article: null,
+        text: null,
+      };
+
+      await sendDraft();
+
+      return sendJson(res, 200, {
+        ok: true,
+        draft: currentDraft,
+      });
+    } catch (error) {
+      console.error("GET /draft/test error:", error);
+
+      return sendJson(res, 500, {
+        ok: false,
+        error: error.message || "Failed to create test draft",
+      });
+    }
+  }
+
+  if (req.method === "POST" && req.url === "/draft/publish") {
+    try {
+      const body = await parseRequestBody(req);
+
+      if (!currentDraft) {
+        return sendJson(res, 400, {
+          ok: false,
+          error: "No active draft",
+        });
+      }
+
+      const finalTitle = cleanupTitle(body.title || currentDraft.title || "");
+      const finalText = stripHtml(body.text || currentDraft.description || "");
+      const messageHtml = finalText
+        ? `<b>${escapeHtml(finalTitle)}</b>\n\n${escapeHtml(finalText)}`
+        : `<b>${escapeHtml(finalTitle)}</b>`;
+
+      await sendMessage(CHANNEL_CHAT_ID, messageHtml);
+
+      currentDraft.status = "published";
+      currentDraft.publishedAt = new Date().toISOString();
+
+      if (currentSlot) {
+        currentSlot.completed = true;
+        markSlotProcessed(currentSlot.slotKey);
+        currentSlot = null;
+      }
+
+      return sendJson(res, 200, {
+        ok: true,
+        message: "Published",
+      });
+    } catch (error) {
+      console.error("POST /draft/publish error:", error);
+      return sendJson(res, 500, {
+        ok: false,
+        error: error.message || "Publish failed",
+      });
+    }
   }
 
   return sendJson(res, 404, {
