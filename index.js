@@ -52,3 +52,28 @@ console.log("Bot started");
 setTimeout(() => {
   sendMessageWithButtons("978193902", "📰 Нова новина:\n\nТут буде текст від ІІ");
 }, 5000);
+setInterval(() => {
+  const options = {
+    hostname: "api.telegram.org",
+    path: `/bot${TOKEN}/getUpdates`,
+    method: "GET",
+  };
+
+  const req = https.request(options, (res) => {
+    let responseData = "";
+
+    res.on("data", (chunk) => {
+      responseData += chunk;
+    });
+
+    res.on("end", () => {
+      console.log("UPDATES:", responseData);
+    });
+  });
+
+  req.on("error", (error) => {
+    console.error("GetUpdates error:", error);
+  });
+
+  req.end();
+}, 5000);
