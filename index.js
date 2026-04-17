@@ -36,5 +36,5 @@ console.log("Bot started");
 
 // тестове повідомлення (вставиш свій chat_id далі)
 setTimeout(() => {
-sendMessage("YOUR_CHAT_ID", "Бот працює 🚀");
+sendMessage("-1003675505328", "Бот працює 🚀");
 }, 5000);
