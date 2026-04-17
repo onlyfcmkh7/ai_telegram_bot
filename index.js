@@ -16,12 +16,11 @@ const sendRequest = (hostname, path, data = null, method = "GET") => {
       hostname,
       path,
       method,
-      headers: body
-        ? {
-            "Content-Type": "application/json",
-            "Content-Length": Buffer.byteLength(body),
-          }
-        : {},
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": body ? Buffer.byteLength(body) : 0,
+        "User-Agent": "my-crypto-bot",
+      },
     };
 
     const req = https.request(options, (res) => {
