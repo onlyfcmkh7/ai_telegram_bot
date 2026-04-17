@@ -7,17 +7,15 @@ const TOKEN = process.env.TELEGRAM_TOKEN;
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
 const PORT = process.env.PORT || 3000;
 
-const PRIVATE_CHAT_ID = "978193902";
 const CHANNEL_CHAT_ID = "-1003675505328";
 
 const TIMEZONE = "Europe/Kyiv";
-const SCHEDULE_TIMES = ["11:00", "14:00", "23:59"];
+const SCHEDULE_TIMES = ["11:00", "14:00", "18:00"];
 
 const MAX_ATTEMPTS_PER_SLOT = 5;
 const NEWS_PAGE_SIZE = 30;
 const STATE_FILE = path.join(__dirname, "bot_state.json");
 
-let lastUpdateId = 0;
 let currentSlot = null;
 let currentDraft = null;
 
@@ -385,20 +383,14 @@ function telegramMultipartRequest(methodName, fields = {}, file = null) {
   });
 }
 
-/* ================= TELEGRAM ================= */
+/* ================= TELEGRAM PUBLISH ================= */
 
-const sendMessage = async (chatId, text, buttons = null) => {
+const sendMessage = async (chatId, text) => {
   const payload = {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
   };
-
-  if (buttons) {
-    payload.reply_markup = {
-      inline_keyboard: [buttons],
-    };
-  }
 
   const result = await tg("/sendMessage", payload, "POST");
   console.log("sendMessage:", JSON.stringify(result));
@@ -424,40 +416,6 @@ const sendPhotoToTelegram = async (chatId, captionHtml, imageBuffer, mimeType) =
 
   console.log("sendPhoto:", JSON.stringify(result));
   return result;
-};
-
-const answer = async (callbackQueryId, text) => {
-  const result = await tg(
-    "/answerCallbackQuery",
-    {
-      callback_query_id: callbackQueryId,
-      text,
-    },
-    "POST"
-  );
-
-  console.log("answerCallbackQuery:", JSON.stringify(result));
-  return result;
-};
-
-const removeInlineButtons = async (chatId, messageId) => {
-  try {
-    const result = await tg(
-      "/editMessageReplyMarkup",
-      {
-        chat_id: chatId,
-        message_id: messageId,
-        reply_markup: {
-          inline_keyboard: [],
-        },
-      },
-      "POST"
-    );
-
-    console.log("editMessageReplyMarkup:", JSON.stringify(result));
-  } catch (error) {
-    console.error("removeInlineButtons error:", error);
-  }
 };
 
 /* ================= NEWS FILTER ================= */
@@ -646,16 +604,7 @@ async function sendDraft(options = {}) {
   if (!currentSlot) return;
   if (currentSlot.completed) return;
 
-  const silent = !!options.silent;
-
   if (currentSlot.attempts >= MAX_ATTEMPTS_PER_SLOT) {
-    if (!silent) {
-      await sendMessage(
-        PRIVATE_CHAT_ID,
-        `⚠️ Ліміт спроб для слота ${currentSlot.timeLabel} вичерпано. Чекаю наступного слота.`
-      );
-    }
-
     currentSlot.completed = true;
     markSlotProcessed(currentSlot.slotKey);
     currentSlot = null;
@@ -670,14 +619,6 @@ async function sendDraft(options = {}) {
     article = await getNextUniqueArticle();
   } catch (error) {
     console.error("getNextUniqueArticle error:", error);
-
-    if (!silent) {
-      await sendMessage(
-        PRIVATE_CHAT_ID,
-        `⚠️ Не вдалося отримати новину: ${escapeHtml(error.message)}`
-      );
-    }
-
     currentSlot.completed = true;
     markSlotProcessed(currentSlot.slotKey);
     currentSlot = null;
@@ -686,13 +627,6 @@ async function sendDraft(options = {}) {
   }
 
   if (!article) {
-    if (!silent) {
-      await sendMessage(
-        PRIVATE_CHAT_ID,
-        `⚠️ Якісних унікальних крипто-новин не знайдено для слота ${currentSlot.timeLabel}.`
-      );
-    }
-
     currentSlot.completed = true;
     markSlotProcessed(currentSlot.slotKey);
     currentSlot = null;
@@ -727,87 +661,9 @@ async function sendDraft(options = {}) {
     status: "pending",
   };
 
-  await sendMessage(PRIVATE_CHAT_ID, text, [
-    { text: "✅ Опублікувати", callback_data: "publish|" + draftId },
-    { text: "❌ Інша", callback_data: "reject|" + draftId },
-  ]);
-
   console.log(
-    `Draft sent. slot=${currentSlot.slotKey}, attempt=${currentSlot.attempts}, url=${article.url}`
+    `Draft created. slot=${currentSlot.slotKey}, attempt=${currentSlot.attempts}, url=${article.url}`
   );
-}
-
-/* ================= CALLBACK ================= */
-
-async function handleUpdates() {
-  const res = await tg(`/getUpdates?offset=${lastUpdateId + 1}`);
-
-  if (!res.ok || !Array.isArray(res.result) || !res.result.length) return;
-
-  for (const u of res.result) {
-    lastUpdateId = u.update_id;
-
-    if (!u.callback_query) continue;
-
-    const callback = u.callback_query;
-    const [action, id] = String(callback.data || "").split("|");
-
-    if (!currentSlot || !currentSlot.pendingId || id !== currentSlot.pendingId) {
-      await answer(callback.id, "Неактуально");
-      if (callback.message) {
-        await removeInlineButtons(callback.message.chat.id, callback.message.message_id);
-      }
-      continue;
-    }
-
-    if (action === "publish") {
-      try {
-        await sendMessage(CHANNEL_CHAT_ID, currentSlot.text);
-        await answer(callback.id, "Опубліковано ✅");
-
-        if (callback.message) {
-          await removeInlineButtons(callback.message.chat.id, callback.message.message_id);
-        }
-
-        if (currentDraft) {
-          currentDraft.status = "published";
-          currentDraft.publishedAt = new Date().toISOString();
-        }
-
-        currentSlot.completed = true;
-        markSlotProcessed(currentSlot.slotKey);
-        currentSlot = null;
-      } catch (error) {
-        console.error("publish error:", error);
-        await answer(callback.id, "Помилка публікації");
-      }
-
-      continue;
-    }
-
-    if (action === "reject") {
-      try {
-        await answer(callback.id, "Шукаю іншу новину...");
-        if (callback.message) {
-          await removeInlineButtons(callback.message.chat.id, callback.message.message_id);
-        }
-
-        if (currentDraft) {
-          currentDraft.status = "rejected";
-          currentDraft.rejectedAt = new Date().toISOString();
-        }
-
-        currentSlot.pendingId = null;
-        currentSlot.article = null;
-        currentSlot.text = null;
-
-        await sendDraft();
-      } catch (error) {
-        console.error("reject error:", error);
-        await answer(callback.id, "Помилка");
-      }
-    }
-  }
 }
 
 /* ================= API ================= */
@@ -945,7 +801,7 @@ const apiServer = http.createServer(async (req, res) => {
 
         try {
           imageBuffer = Buffer.from(imageBase64, "base64");
-        } catch (error) {
+        } catch {
           return sendJson(res, 400, {
             ok: false,
             error: "Invalid imageBase64",
@@ -973,7 +829,14 @@ const apiServer = http.createServer(async (req, res) => {
           });
         }
       } else {
-        await sendMessage(CHANNEL_CHAT_ID, messageHtml);
+        const messageResult = await sendMessage(CHANNEL_CHAT_ID, messageHtml);
+
+        if (!messageResult.ok) {
+          return sendJson(res, 500, {
+            ok: false,
+            error: messageResult.description || "Telegram sendMessage failed",
+          });
+        }
       }
 
       currentDraft.status = "published";
@@ -1050,19 +913,13 @@ async function bootstrap() {
     throw new Error("NEWS_API_KEY is not set");
   }
 
-  console.log("Bot started");
+  console.log("Server started");
   console.log("Schedule:", SCHEDULE_TIMES.join(", "));
   console.log("Timezone:", TIMEZONE);
 
   apiServer.listen(PORT, () => {
     console.log(`API server started on port ${PORT}`);
   });
-
-  setInterval(() => {
-    handleUpdates().catch((error) => {
-      console.error("handleUpdates error:", error);
-    });
-  }, 3000);
 
   setInterval(() => {
     scheduler().catch((error) => {
