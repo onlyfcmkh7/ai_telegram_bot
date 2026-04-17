@@ -11,7 +11,7 @@ const PRIVATE_CHAT_ID = "978193902";
 const CHANNEL_CHAT_ID = "-1003675505328";
 
 const TIMEZONE = "Europe/Kyiv";
-const SCHEDULE_TIMES = ["11:00", "14:00", "23:45"];
+const SCHEDULE_TIMES = ["11:00", "14:00", "18:00"];
 
 const MAX_ATTEMPTS_PER_SLOT = 5;
 const NEWS_PAGE_SIZE = 30;
@@ -226,6 +226,47 @@ function parseRequestBody(req) {
   });
 }
 
+function buildPostHtml(title, text) {
+  const finalTitle = typeof title === "string" ? cleanupTitle(title) : "";
+  const finalText = typeof text === "string" ? stripHtml(text) : "";
+
+  if (finalTitle && finalText) {
+    return `<b>${escapeHtml(finalTitle)}</b>\n\n${escapeHtml(finalText)}`;
+  }
+
+  if (finalTitle) {
+    return `<b>${escapeHtml(finalTitle)}</b>`;
+  }
+
+  if (finalText) {
+    return escapeHtml(finalText);
+  }
+
+  return "";
+}
+
+function getExtensionFromMime(mimeType) {
+  const value = String(mimeType || "").toLowerCase();
+
+  if (value.includes("png")) return "png";
+  if (value.includes("webp")) return "webp";
+  if (value.includes("jpg") || value.includes("jpeg")) return "jpg";
+
+  return "jpg";
+}
+
+function sanitizeBase64(input) {
+  const raw = String(input || "").trim();
+  if (!raw) return "";
+
+  const commaIndex = raw.indexOf(",");
+  if (commaIndex !== -1) {
+    return raw.slice(commaIndex + 1).trim();
+  }
+
+  return raw;
+}
+
 /* ================= REQUEST ================= */
 
 const sendRequest = (hostname, pathValue, data = null, method = "GET") => {
@@ -272,6 +313,78 @@ const tg = (pathValue, data = null, method = "GET") => {
   return sendRequest("api.telegram.org", `/bot${TOKEN}${pathValue}`, data, method);
 };
 
+function telegramMultipartRequest(methodName, fields = {}, file = null) {
+  return new Promise((resolve, reject) => {
+    const boundary = `----NodeTelegramBoundary${Date.now()}`;
+    const chunks = [];
+
+    const appendField = (name, value) => {
+      chunks.push(Buffer.from(`--${boundary}\r\n`));
+      chunks.push(
+        Buffer.from(`Content-Disposition: form-data; name="${name}"\r\n\r\n`)
+      );
+      chunks.push(Buffer.from(String(value)));
+      chunks.push(Buffer.from("\r\n"));
+    };
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (value === undefined || value === null) continue;
+      appendField(key, value);
+    }
+
+    if (file && file.buffer) {
+      chunks.push(Buffer.from(`--${boundary}\r\n`));
+      chunks.push(
+        Buffer.from(
+          `Content-Disposition: form-data; name="${file.fieldName}"; filename="${file.filename}"\r\n`
+        )
+      );
+      chunks.push(
+        Buffer.from(`Content-Type: ${file.contentType || "application/octet-stream"}\r\n\r\n`)
+      );
+      chunks.push(file.buffer);
+      chunks.push(Buffer.from("\r\n"));
+    }
+
+    chunks.push(Buffer.from(`--${boundary}--\r\n`));
+
+    const body = Buffer.concat(chunks);
+
+    const options = {
+      hostname: "api.telegram.org",
+      path: `/bot${TOKEN}/${methodName}`,
+      method: "POST",
+      headers: {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        "Content-Length": body.length,
+        "User-Agent": "ai-telegram-bot",
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let responseData = "";
+
+      res.on("data", (chunk) => {
+        responseData += chunk;
+      });
+
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(responseData);
+          resolve(parsed);
+        } catch (error) {
+          console.error("telegramMultipartRequest parse error:", responseData);
+          reject(error);
+        }
+      });
+    });
+
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 /* ================= TELEGRAM ================= */
 
 const sendMessage = async (chatId, text, buttons = null) => {
@@ -289,6 +402,27 @@ const sendMessage = async (chatId, text, buttons = null) => {
 
   const result = await tg("/sendMessage", payload, "POST");
   console.log("sendMessage:", JSON.stringify(result));
+  return result;
+};
+
+const sendPhotoToTelegram = async (chatId, captionHtml, imageBuffer, mimeType) => {
+  const ext = getExtensionFromMime(mimeType);
+  const result = await telegramMultipartRequest(
+    "sendPhoto",
+    {
+      chat_id: chatId,
+      caption: captionHtml,
+      parse_mode: "HTML",
+    },
+    {
+      fieldName: "photo",
+      filename: `post.${ext}`,
+      contentType: mimeType || "image/jpeg",
+      buffer: imageBuffer,
+    }
+  );
+
+  console.log("sendPhoto:", JSON.stringify(result));
   return result;
 };
 
@@ -794,22 +928,53 @@ const apiServer = http.createServer(async (req, res) => {
           ? stripHtml(body.text)
           : stripHtml(currentDraft.description || "");
 
-      let messageHtml = "";
+      const messageHtml = buildPostHtml(finalTitle, finalText);
 
-      if (finalTitle && finalText) {
-        messageHtml = `<b>${escapeHtml(finalTitle)}</b>\n\n${escapeHtml(finalText)}`;
-      } else if (finalTitle) {
-        messageHtml = `<b>${escapeHtml(finalTitle)}</b>`;
-      } else if (finalText) {
-        messageHtml = escapeHtml(finalText);
-      } else {
+      if (!messageHtml) {
         return sendJson(res, 400, {
           ok: false,
           error: "Empty post",
         });
       }
 
-      await sendMessage(CHANNEL_CHAT_ID, messageHtml);
+      const imageBase64 = sanitizeBase64(body.imageBase64);
+      const imageMimeType = String(body.imageMimeType || "image/jpeg").trim();
+
+      if (imageBase64) {
+        let imageBuffer;
+
+        try {
+          imageBuffer = Buffer.from(imageBase64, "base64");
+        } catch (error) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: "Invalid imageBase64",
+          });
+        }
+
+        if (!imageBuffer || !imageBuffer.length) {
+          return sendJson(res, 400, {
+            ok: false,
+            error: "Empty image",
+          });
+        }
+
+        const photoResult = await sendPhotoToTelegram(
+          CHANNEL_CHAT_ID,
+          messageHtml,
+          imageBuffer,
+          imageMimeType
+        );
+
+        if (!photoResult.ok) {
+          return sendJson(res, 500, {
+            ok: false,
+            error: photoResult.description || "Telegram sendPhoto failed",
+          });
+        }
+      } else {
+        await sendMessage(CHANNEL_CHAT_ID, messageHtml);
+      }
 
       currentDraft.status = "published";
       currentDraft.publishedAt = new Date().toISOString();
