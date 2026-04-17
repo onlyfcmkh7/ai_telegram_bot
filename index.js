@@ -9,238 +9,93 @@ const PRIVATE_CHAT_ID = "978193902";
 const CHANNEL_CHAT_ID = "-1003675505328";
 
 const TIMEZONE = "Europe/Kyiv";
-const SCHEDULE_TIMES = ["11:00", "14:00", "18:50"];
+const SCHEDULE_TIMES = ["11:00", "14:00", "18:57"];
 const MAX_ATTEMPTS_PER_SLOT = 5;
 const NEWS_PAGE_SIZE = 15;
 const STATE_FILE = path.join(__dirname, "bot_state.json");
 
 let lastUpdateId = 0;
-
 let currentSlot = null;
-/*
-currentSlot = {
-  slotKey: "2026-04-17_11:00",
-  dateKey: "2026-04-17",
-  timeLabel: "11:00",
-  attempts: 0,
-  completed: false,
-  pendingDraftId: null,
-  pendingArticle: null,
-  pendingText: null
-}
-*/
 
 const state = loadState();
 
-/* =========================
-   BASIC HELPERS
-========================= */
+/* ================= STATE ================= */
 
 function loadState() {
   try {
     if (!fs.existsSync(STATE_FILE)) {
-      return {
-        seenUrls: [],
-        publishedUrls: [],
-        processedSlots: [],
-        draftCounter: 0,
-      };
+      return { seenUrls: [], processedSlots: [], draftCounter: 0 };
     }
-
-    const raw = fs.readFileSync(STATE_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-
-    return {
-      seenUrls: Array.isArray(parsed.seenUrls) ? parsed.seenUrls : [],
-      publishedUrls: Array.isArray(parsed.publishedUrls) ? parsed.publishedUrls : [],
-      processedSlots: Array.isArray(parsed.processedSlots) ? parsed.processedSlots : [],
-      draftCounter: Number.isInteger(parsed.draftCounter) ? parsed.draftCounter : 0,
-    };
-  } catch (error) {
-    console.error("loadState error:", error);
-    return {
-      seenUrls: [],
-      publishedUrls: [],
-      processedSlots: [],
-      draftCounter: 0,
-    };
+    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return { seenUrls: [], processedSlots: [], draftCounter: 0 };
   }
 }
 
 function saveState() {
-  try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
-  } catch (error) {
-    console.error("saveState error:", error);
-  }
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-function normalizeUrl(input) {
+function normalizeUrl(url) {
   try {
-    const url = new URL(input);
-    url.hash = "";
-
-    const paramsToDelete = [];
-    for (const key of url.searchParams.keys()) {
-      const lower = key.toLowerCase();
-      if (
-        lower.startsWith("utm_") ||
-        lower === "fbclid" ||
-        lower === "gclid" ||
-        lower === "mc_cid" ||
-        lower === "mc_eid"
-      ) {
-        paramsToDelete.push(key);
-      }
-    }
-
-    for (const key of paramsToDelete) {
-      url.searchParams.delete(key);
-    }
-
-    const query = url.searchParams.toString();
-    return `${url.origin}${url.pathname}${query ? `?${query}` : ""}`;
+    const u = new URL(url);
+    u.hash = "";
+    return u.origin + u.pathname;
   } catch {
-    return (input || "").trim();
+    return url;
   }
 }
 
-function markUrlSeen(url) {
-  const normalized = normalizeUrl(url);
-  if (!normalized) return;
+function isSeen(url) {
+  return state.seenUrls.includes(normalizeUrl(url));
+}
 
-  if (!state.seenUrls.includes(normalized)) {
-    state.seenUrls.push(normalized);
-
-    if (state.seenUrls.length > 1000) {
-      state.seenUrls = state.seenUrls.slice(-1000);
-    }
-
+function markSeen(url) {
+  const u = normalizeUrl(url);
+  if (!state.seenUrls.includes(u)) {
+    state.seenUrls.push(u);
     saveState();
   }
-}
-
-function markUrlPublished(url) {
-  const normalized = normalizeUrl(url);
-  if (!normalized) return;
-
-  if (!state.publishedUrls.includes(normalized)) {
-    state.publishedUrls.push(normalized);
-
-    if (state.publishedUrls.length > 1000) {
-      state.publishedUrls = state.publishedUrls.slice(-1000);
-    }
-
-    saveState();
-  }
-}
-
-function isUrlSeen(url) {
-  const normalized = normalizeUrl(url);
-  return !!normalized && state.seenUrls.includes(normalized);
-}
-
-function markSlotProcessed(slotKey) {
-  if (!state.processedSlots.includes(slotKey)) {
-    state.processedSlots.push(slotKey);
-
-    if (state.processedSlots.length > 300) {
-      state.processedSlots = state.processedSlots.slice(-300);
-    }
-
-    saveState();
-  }
-}
-
-function isSlotProcessed(slotKey) {
-  return state.processedSlots.includes(slotKey);
 }
 
 function nextDraftId() {
-  state.draftCounter += 1;
+  state.draftCounter++;
   saveState();
   return String(state.draftCounter);
 }
 
-function getKyivNowParts() {
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
+/* ================= REQUEST ================= */
 
-  const parts = formatter.formatToParts(new Date());
-  const map = {};
-
-  for (const part of parts) {
-    if (part.type !== "literal") {
-      map[part.type] = part.value;
-    }
-  }
-
-  return {
-    dateKey: `${map.year}-${map.month}-${map.day}`,
-    timeLabel: `${map.hour}:${map.minute}`,
-  };
-}
-
-function escapeHtml(text) {
-  return String(text || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-/* =========================
-   HTTP / TELEGRAM
-========================= */
-
-const sendRequest = (hostname, pathValue, data = null, method = "GET") => {
-  return new Promise((resolve, reject) => {
+const sendRequest = (host, path, data = null, method = "GET") =>
+  new Promise((resolve, reject) => {
     const body = data ? JSON.stringify(data) : null;
 
-    const options = {
-      hostname,
-      path: pathValue,
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": body ? Buffer.byteLength(body) : 0,
-        "User-Agent": "my-crypto-bot",
+    const req = https.request(
+      {
+        hostname: host,
+        path,
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": body ? Buffer.byteLength(body) : 0,
+        },
       },
-    };
-
-    const req = https.request(options, (res) => {
-      let responseData = "";
-
-      res.on("data", (chunk) => {
-        responseData += chunk;
-      });
-
-      res.on("end", () => {
-        try {
-          resolve(JSON.parse(responseData));
-        } catch (error) {
-          console.error("PARSE ERROR:", responseData);
-          reject(error);
-        }
-      });
-    });
+      (res) => {
+        let d = "";
+        res.on("data", (c) => (d += c));
+        res.on("end", () => resolve(JSON.parse(d)));
+      }
+    );
 
     req.on("error", reject);
-
     if (body) req.write(body);
     req.end();
   });
-};
 
-const telegramRequest = (pathValue, data = null, method = "GET") => {
-  return sendRequest("api.telegram.org", `/bot${TOKEN}${pathValue}`, data, method);
-};
+const tg = (path, data, method = "GET") =>
+  sendRequest("api.telegram.org", `/bot${TOKEN}${path}`, data, method);
+
+/* ================= TELEGRAM ================= */
 
 const sendMessage = async (chatId, text, buttons = null) => {
   const payload = {
@@ -250,375 +105,145 @@ const sendMessage = async (chatId, text, buttons = null) => {
   };
 
   if (buttons) {
-    payload.reply_markup = {
-      inline_keyboard: [buttons],
-    };
+    payload.reply_markup = { inline_keyboard: [buttons] };
   }
 
-  const result = await telegramRequest("/sendMessage", payload, "POST");
-  console.log("sendMessage:", JSON.stringify(result));
-  return result;
+  return tg("/sendMessage", payload, "POST");
 };
 
-const answerCallbackQuery = async (callbackQueryId, text) => {
-  const result = await telegramRequest(
-    "/answerCallbackQuery",
-    {
-      callback_query_id: callbackQueryId,
-      text,
-    },
-    "POST"
+const answer = (id, text) =>
+  tg("/answerCallbackQuery", { callback_query_id: id, text }, "POST");
+
+/* ================= NEWS ================= */
+
+const getNews = async () => {
+  const res = await sendRequest(
+    "newsapi.org",
+    `/v2/everything?q=crypto&language=en&sortBy=publishedAt&pageSize=${NEWS_PAGE_SIZE}&apiKey=${NEWS_API_KEY}`
   );
 
-  console.log("answerCallbackQuery:", JSON.stringify(result));
-  return result;
-};
-
-const removeInlineButtons = async (chatId, messageId) => {
-  try {
-    const result = await telegramRequest(
-      "/editMessageReplyMarkup",
-      {
-        chat_id: chatId,
-        message_id: messageId,
-        reply_markup: {
-          inline_keyboard: [],
-        },
-      },
-      "POST"
-    );
-
-    console.log("editMessageReplyMarkup:", JSON.stringify(result));
-  } catch (error) {
-    console.error("removeInlineButtons error:", error);
-  }
-};
-
-/* =========================
-   NEWS / TRANSLATION
-========================= */
-
-const getCryptoNewsCandidates = async () => {
-  const query = encodeURIComponent("(crypto OR bitcoin OR ethereum OR blockchain)");
-  const pathValue =
-    `/v2/everything` +
-    `?q=${query}` +
-    `&language=en` +
-    `&sortBy=publishedAt` +
-    `&pageSize=${NEWS_PAGE_SIZE}` +
-    `&apiKey=${NEWS_API_KEY}`;
-
-  const result = await sendRequest("newsapi.org", pathValue, null, "GET");
-
-  if (!result.articles || !result.articles.length) {
-    throw new Error("No crypto news found");
-  }
-
-  return result.articles.map((article) => ({
-    title: article.title || "Без заголовка",
-    description: article.description || "Опис відсутній",
-    url: normalizeUrl(article.url || ""),
+  return res.articles.map((a) => ({
+    title: a.title,
+    description: a.description,
+    url: a.url,
   }));
 };
 
-const getNextUniqueArticle = async () => {
-  const articles = await getCryptoNewsCandidates();
-
-  for (const article of articles) {
-    if (!article.url) continue;
-    if (isUrlSeen(article.url)) continue;
-
-    return article;
-  }
-
-  return null;
-};
-
-const translateToUkrainian = async (text) => {
-  const source = String(text || "").trim();
-  if (!source) return "";
-
-  const query = encodeURIComponent(source);
-
-  const result = await sendRequest(
+const translate = async (text) => {
+  const res = await sendRequest(
     "api.mymemory.translated.net",
-    `/get?q=${query}&langpair=en|uk`,
-    null,
-    "GET"
+    `/get?q=${encodeURIComponent(text)}&langpair=en|uk`
   );
 
-  return result.responseData?.translatedText || source;
+  return res.responseData.translatedText;
 };
 
-const buildDraftText = async (article) => {
-  const title = await translateToUkrainian(article.title);
-  const description = await translateToUkrainian(article.description);
+/* ================= FORMAT (ОСНОВНА ЗМІНА) ================= */
 
-  return (
-    `📰 <b>Крипто-новина</b>\n\n` +
-    `${escapeHtml(title)}\n\n` +
-    `${escapeHtml(description)}`
-  );
+const escapeHtml = (t) =>
+  t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const buildText = async (article) => {
+  const title = await translate(article.title);
+  const desc = await translate(article.description);
+
+  return `<b>${escapeHtml(title)}</b>\n\n${escapeHtml(desc)}`;
 };
 
-/* =========================
-   SLOT LOGIC
-========================= */
+/* ================= SLOT ================= */
 
-async function startSlot(slotKey, dateKey, timeLabel) {
-  currentSlot = {
-    slotKey,
-    dateKey,
-    timeLabel,
-    attempts: 0,
-    completed: false,
-    pendingDraftId: null,
-    pendingArticle: null,
-    pendingText: null,
-  };
-
-  console.log(`Starting slot ${slotKey}`);
-  await sendNextDraftForCurrentSlot();
-}
-
-function finishCurrentSlot() {
+async function sendDraft() {
   if (!currentSlot) return;
 
-  console.log(`Finishing slot ${currentSlot.slotKey}`);
-  markSlotProcessed(currentSlot.slotKey);
-  currentSlot.completed = true;
-  currentSlot.pendingDraftId = null;
-  currentSlot.pendingArticle = null;
-  currentSlot.pendingText = null;
-  currentSlot = null;
-}
-
-async function sendNextDraftForCurrentSlot() {
-  if (!currentSlot || currentSlot.completed) return;
-
   if (currentSlot.attempts >= MAX_ATTEMPTS_PER_SLOT) {
-    await sendMessage(
-      PRIVATE_CHAT_ID,
-      `⚠️ Для слота ${currentSlot.timeLabel} вичерпано ліміт спроб (${MAX_ATTEMPTS_PER_SLOT}). Чекаю наступного слота.`
-    );
-    finishCurrentSlot();
+    currentSlot = null;
     return;
   }
 
-  currentSlot.attempts += 1;
+  currentSlot.attempts++;
 
-  let article = null;
+  const news = await getNews();
 
-  try {
-    article = await getNextUniqueArticle();
-  } catch (error) {
-    console.error("getNextUniqueArticle error:", error);
-    await sendMessage(
-      PRIVATE_CHAT_ID,
-      `⚠️ Не вдалося отримати новину для слота ${currentSlot.timeLabel}.`
-    );
-    finishCurrentSlot();
-    return;
-  }
+  const article = news.find((n) => !isSeen(n.url));
 
-  if (!article) {
-    await sendMessage(
-      PRIVATE_CHAT_ID,
-      `⚠️ Унікальні новини для слота ${currentSlot.timeLabel} не знайдені. Чекаю наступного слота.`
-    );
-    finishCurrentSlot();
-    return;
-  }
+  if (!article) return;
 
-  markUrlSeen(article.url);
+  markSeen(article.url);
 
-  let draftText = "";
-  try {
-    draftText = await buildDraftText(article);
-  } catch (error) {
-    console.error("buildDraftText error:", error);
-    draftText =
-      `📰 <b>Крипто-новина</b>\n\n` +
-      `${escapeHtml(article.title)}\n\n` +
-      `${escapeHtml(article.description)}`;
-  }
+  const text = await buildText(article);
+  const id = nextDraftId();
 
-  const draftId = nextDraftId();
+  currentSlot.pendingId = id;
+  currentSlot.text = text;
 
-  currentSlot.pendingDraftId = draftId;
-  currentSlot.pendingArticle = article;
-  currentSlot.pendingText = draftText;
-
-  await sendMessage(PRIVATE_CHAT_ID, draftText, [
-    { text: "✅ Опублікувати", callback_data: `publish|${draftId}` },
-    { text: "❌ Відхилити", callback_data: `reject|${draftId}` },
+  await sendMessage(PRIVATE_CHAT_ID, text, [
+    { text: "✅ Опублікувати", callback_data: "publish|" + id },
+    { text: "❌ Інша", callback_data: "reject|" + id },
   ]);
-
-  console.log(
-    `Draft sent for slot ${currentSlot.slotKey}, attempt ${currentSlot.attempts}, url=${article.url}`
-  );
 }
 
-/* =========================
-   CALLBACKS / UPDATES
-========================= */
+/* ================= CALLBACK ================= */
 
-async function handlePublish(callback, draftId) {
-  const callbackId = callback.id;
-  const message = callback.message;
+async function handleUpdates() {
+  const res = await tg(`/getUpdates?offset=${lastUpdateId + 1}`);
 
-  if (!currentSlot || !currentSlot.pendingDraftId || currentSlot.completed) {
-    await answerCallbackQuery(callbackId, "Активного чернеткового поста вже немає");
-    return;
-  }
+  if (!res.result) return;
 
-  if (draftId !== currentSlot.pendingDraftId) {
-    await answerCallbackQuery(callbackId, "Ця кнопка вже неактуальна");
-    await removeInlineButtons(message.chat.id, message.message_id);
-    return;
-  }
+  for (const u of res.result) {
+    lastUpdateId = u.update_id;
 
-  try {
-    await sendMessage(CHANNEL_CHAT_ID, currentSlot.pendingText);
-    markUrlPublished(currentSlot.pendingArticle.url);
+    if (!u.callback_query) continue;
 
-    await answerCallbackQuery(callbackId, "Опубліковано в канал ✅");
-    await removeInlineButtons(message.chat.id, message.message_id);
+    const [action, id] = u.callback_query.data.split("|");
 
-    finishCurrentSlot();
-  } catch (error) {
-    console.error("handlePublish error:", error);
-    await answerCallbackQuery(callbackId, "Помилка під час публікації");
-  }
-}
-
-async function handleReject(callback, draftId) {
-  const callbackId = callback.id;
-  const message = callback.message;
-
-  if (!currentSlot || !currentSlot.pendingDraftId || currentSlot.completed) {
-    await answerCallbackQuery(callbackId, "Активного чернеткового поста вже немає");
-    return;
-  }
-
-  if (draftId !== currentSlot.pendingDraftId) {
-    await answerCallbackQuery(callbackId, "Ця кнопка вже неактуальна");
-    await removeInlineButtons(message.chat.id, message.message_id);
-    return;
-  }
-
-  try {
-    await answerCallbackQuery(callbackId, "Шукаю іншу новину ❌");
-    await removeInlineButtons(message.chat.id, message.message_id);
-
-    currentSlot.pendingDraftId = null;
-    currentSlot.pendingArticle = null;
-    currentSlot.pendingText = null;
-
-    await sendNextDraftForCurrentSlot();
-  } catch (error) {
-    console.error("handleReject error:", error);
-    await answerCallbackQuery(callbackId, "Помилка під час відхилення");
-  }
-}
-
-const handleUpdates = async () => {
-  const result = await telegramRequest(`/getUpdates?offset=${lastUpdateId + 1}`);
-
-  if (!result.ok || !result.result || !result.result.length) return;
-
-  for (const update of result.result) {
-    lastUpdateId = update.update_id;
-
-    if (!update.callback_query) continue;
-
-    const callback = update.callback_query;
-    const data = String(callback.data || "");
-    const [action, draftId] = data.split("|");
+    if (!currentSlot || id !== currentSlot.pendingId) {
+      await answer(u.callback_query.id, "Неактуально");
+      continue;
+    }
 
     if (action === "publish") {
-      await handlePublish(callback, draftId);
-      continue;
+      await sendMessage(CHANNEL_CHAT_ID, currentSlot.text);
+      await answer(u.callback_query.id, "Опубліковано ✅");
+      currentSlot = null;
     }
 
     if (action === "reject") {
-      await handleReject(callback, draftId);
-      continue;
+      await answer(u.callback_query.id, "Інша новина...");
+      await sendDraft();
     }
   }
-};
-
-/* =========================
-   SCHEDULER
-========================= */
-
-async function checkSchedule() {
-  const { dateKey, timeLabel } = getKyivNowParts();
-
-  if (!SCHEDULE_TIMES.includes(timeLabel)) {
-    return;
-  }
-
-  const slotKey = `${dateKey}_${timeLabel}`;
-
-  if (isSlotProcessed(slotKey)) {
-    return;
-  }
-
-  if (currentSlot && currentSlot.slotKey === slotKey) {
-    return;
-  }
-
-  if (currentSlot && !currentSlot.completed) {
-    console.log(
-      `Slot ${slotKey} skipped because current slot ${currentSlot.slotKey} is still active`
-    );
-    return;
-  }
-
-  try {
-    await startSlot(slotKey, dateKey, timeLabel);
-  } catch (error) {
-    console.error("checkSchedule/startSlot error:", error);
-  }
 }
 
-/* =========================
-   START
-========================= */
+/* ================= TIME ================= */
 
-async function bootstrap() {
-  if (!TOKEN) {
-    throw new Error("TELEGRAM_TOKEN is not set");
-  }
+function nowKyiv() {
+  const d = new Date();
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: TIMEZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(d);
 
-  if (!NEWS_API_KEY) {
-    throw new Error("NEWS_API_KEY is not set");
-  }
+  const h = parts.find((p) => p.type === "hour").value;
+  const m = parts.find((p) => p.type === "minute").value;
 
-  console.log("Bot started");
-  console.log(`Timezone: ${TIMEZONE}`);
-  console.log(`Schedule: ${SCHEDULE_TIMES.join(", ")}`);
-
-  setInterval(() => {
-    handleUpdates().catch((error) => {
-      console.error("handleUpdates error:", error);
-    });
-  }, 3000);
-
-  setInterval(() => {
-    checkSchedule().catch((error) => {
-      console.error("checkSchedule error:", error);
-    });
-  }, 30000);
-
-  // Одразу перевіряємо при старті, щоб не чекати перші 30 секунд
-  checkSchedule().catch((error) => {
-    console.error("initial checkSchedule error:", error);
-  });
+  return `${h}:${m}`;
 }
 
-bootstrap().catch((error) => {
-  console.error("bootstrap error:", error);
-  process.exit(1);
-});
+async function scheduler() {
+  const time = nowKyiv();
+
+  if (!SCHEDULE_TIMES.includes(time)) return;
+  if (currentSlot) return;
+
+  currentSlot = { attempts: 0 };
+  await sendDraft();
+}
+
+/* ================= START ================= */
+
+console.log("Bot started");
+
+setInterval(handleUpdates, 3000);
+setInterval(scheduler, 30000);
