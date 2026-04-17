@@ -11,7 +11,7 @@ const PRIVATE_CHAT_ID = "978193902";
 const CHANNEL_CHAT_ID = "-1003675505328";
 
 const TIMEZONE = "Europe/Kyiv";
-const SCHEDULE_TIMES = ["11:00", "14:00", "23:31"];
+const SCHEDULE_TIMES = ["11:00", "14:00", "23:45"];
 
 const MAX_ATTEMPTS_PER_SLOT = 5;
 const NEWS_PAGE_SIZE = 30;
@@ -784,11 +784,30 @@ const apiServer = http.createServer(async (req, res) => {
         });
       }
 
-      const finalTitle = cleanupTitle(body.title || currentDraft.title || "");
-      const finalText = stripHtml(body.text || currentDraft.description || "");
-      const messageHtml = finalText
-        ? `<b>${escapeHtml(finalTitle)}</b>\n\n${escapeHtml(finalText)}`
-        : `<b>${escapeHtml(finalTitle)}</b>`;
+      const finalTitle =
+        typeof body.title === "string"
+          ? cleanupTitle(body.title)
+          : cleanupTitle(currentDraft.title || "");
+
+      const finalText =
+        typeof body.text === "string"
+          ? stripHtml(body.text)
+          : stripHtml(currentDraft.description || "");
+
+      let messageHtml = "";
+
+      if (finalTitle && finalText) {
+        messageHtml = `<b>${escapeHtml(finalTitle)}</b>\n\n${escapeHtml(finalText)}`;
+      } else if (finalTitle) {
+        messageHtml = `<b>${escapeHtml(finalTitle)}</b>`;
+      } else if (finalText) {
+        messageHtml = escapeHtml(finalText);
+      } else {
+        return sendJson(res, 400, {
+          ok: false,
+          error: "Empty post",
+        });
+      }
 
       await sendMessage(CHANNEL_CHAT_ID, messageHtml);
 
