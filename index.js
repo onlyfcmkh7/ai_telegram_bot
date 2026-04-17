@@ -3,38 +3,44 @@ const https = require("https");
 const TOKEN = process.env.TELEGRAM_TOKEN;
 
 const sendMessage = (chatId, text) => {
-const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
+  const data = JSON.stringify({
+    chat_id: chatId,
+    text: text,
+  });
 
-const data = JSON.stringify({
-chat_id: chatId,
-text: text,
-});
+  const options = {
+    hostname: "api.telegram.org",
+    path: `/bot${TOKEN}/sendMessage`,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(data),
+    },
+  };
 
-const options = {
-method: "POST",
-headers: {
-"Content-Type": "application/json",
-"Content-Length": data.length,
-},
-};
+  const req = https.request(options, (res) => {
+    let responseData = "";
 
-const req = https.request(url, options, (res) => {
-res.on("data", (d) => {
-console.log("Response:", d.toString());
-});
-});
+    res.on("data", (chunk) => {
+      responseData += chunk;
+    });
 
-req.on("error", (error) => {
-console.error(error);
-});
+    res.on("end", () => {
+      console.log("Response:", responseData);
+    });
+  });
 
-req.write(data);
-req.end();
+  req.on("error", (error) => {
+    console.error("Error:", error);
+  });
+
+  req.write(data);
+  req.end();
 };
 
 console.log("Bot started");
 
-// тестове повідомлення (вставиш свій chat_id далі)
+// тест
 setTimeout(() => {
-sendMessage("-1003675505328", "Бот працює 🚀");
+  sendMessage("-1003675505328", "Bot works");
 }, 5000);
