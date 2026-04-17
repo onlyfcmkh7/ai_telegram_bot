@@ -1,79 +1,115 @@
 const https = require("https");
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
+const PRIVATE_CHAT_ID = "978193902";
+const CHANNEL_CHAT_ID = "-1003675505328";
 
-const sendMessageWithButtons = (chatId, text) => {
-  const data = JSON.stringify({
-    chat_id: chatId,
-    text: text,
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "✅ Опублікувати", callback_data: "publish" },
-          { text: "❌ Відхилити", callback_data: "reject" },
-        ],
-      ],
-    },
+let lastUpdateId = 0;
+
+const sendRequest = (path, data = null, method = "GET") => {
+  return new Promise((resolve, reject) => {
+    const body = data ? JSON.stringify(data) : null;
+
+    const options = {
+      hostname: "api.telegram.org",
+      path: `/bot${TOKEN}${path}`,
+      method,
+      headers: body
+        ? {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(body),
+          }
+        : {},
+    };
+
+    const req = https.request(options, (res) => {
+      let responseData = "";
+
+      res.on("data", (chunk) => {
+        responseData += chunk;
+      });
+
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(responseData));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+
+    req.on("error", reject);
+
+    if (body) req.write(body);
+    req.end();
   });
+};
 
-  const options = {
-    hostname: "api.telegram.org",
-    path: `/bot${TOKEN}/sendMessage`,
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Content-Length": Buffer.byteLength(data),
-    },
+const sendMessage = async (chatId, text, buttons = null) => {
+  const payload = {
+    chat_id: chatId,
+    text,
   };
 
-  const req = https.request(options, (res) => {
-    let responseData = "";
+  if (buttons) {
+    payload.reply_markup = {
+      inline_keyboard: [buttons],
+    };
+  }
 
-    res.on("data", (chunk) => {
-      responseData += chunk;
-    });
+  const result = await sendRequest("/sendMessage", payload, "POST");
+  console.log("sendMessage:", JSON.stringify(result));
+};
 
-    res.on("end", () => {
-      console.log("Response:", responseData);
-    });
-  });
+const answerCallbackQuery = async (callbackQueryId, text) => {
+  const result = await sendRequest(
+    "/answerCallbackQuery",
+    {
+      callback_query_id: callbackQueryId,
+      text,
+    },
+    "POST"
+  );
+  console.log("answerCallbackQuery:", JSON.stringify(result));
+};
 
-  req.on("error", (error) => {
-    console.error("Error:", error);
-  });
+const handleUpdates = async () => {
+  const result = await sendRequest(`/getUpdates?offset=${lastUpdateId + 1}`);
 
-  req.write(data);
-  req.end();
+  if (!result.ok || !result.result.length) return;
+
+  for (const update of result.result) {
+    lastUpdateId = update.update_id;
+
+    if (update.callback_query) {
+      const callback = update.callback_query;
+      const action = callback.data;
+      const callbackId = callback.id;
+      const draftText = callback.message.text;
+
+      if (action === "publish") {
+        await sendMessage(CHANNEL_CHAT_ID, draftText);
+        await answerCallbackQuery(callbackId, "Опубліковано в канал ✅");
+      }
+
+      if (action === "reject") {
+        await answerCallbackQuery(callbackId, "Відхилено ❌");
+      }
+    }
+  }
 };
 
 console.log("Bot started");
 
-// тест — надсилає тобі в особисті
 setTimeout(() => {
-  sendMessageWithButtons("978193902", "📰 Нова новина:\n\nТут буде текст від ІІ");
+  sendMessage(PRIVATE_CHAT_ID, "📰 Нова новина:\n\nТут буде текст від ІІ", [
+    { text: "✅ Опублікувати", callback_data: "publish" },
+    { text: "❌ Відхилити", callback_data: "reject" },
+  ]);
 }, 5000);
+
 setInterval(() => {
-  const options = {
-    hostname: "api.telegram.org",
-    path: `/bot${TOKEN}/getUpdates`,
-    method: "GET",
-  };
-
-  const req = https.request(options, (res) => {
-    let responseData = "";
-
-    res.on("data", (chunk) => {
-      responseData += chunk;
-    });
-
-    res.on("end", () => {
-      console.log("UPDATES:", responseData);
-    });
+  handleUpdates().catch((error) => {
+    console.error("handleUpdates error:", error);
   });
-
-  req.on("error", (error) => {
-    console.error("GetUpdates error:", error);
-  });
-
-  req.end();
-}, 5000);
+}, 3000);
