@@ -39,8 +39,3 @@ const sendMessage = (chatId, text) => {
 };
 
 console.log("Bot started");
-
-// тест
-setTimeout(() => {
-  sendMessage("-1003675505328", "Bot works");
-}, 5000);
