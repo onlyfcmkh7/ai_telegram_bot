@@ -84,9 +84,11 @@ const answerCallbackQuery = async (callbackQueryId, text) => {
 };
 
 const getCryptoNews = async () => {
+  const query = encodeURIComponent("crypto OR bitcoin OR ethereum");
+
   const result = await sendRequest(
     "newsapi.org",
-    `/v2/everything?q=crypto OR bitcoin OR ethereum&language=en&sortBy=publishedAt&pageSize=1&apiKey=${NEWS_API_KEY}`,
+    `/v2/everything?q=${query}&language=en&sortBy=publishedAt&pageSize=1&apiKey=${NEWS_API_KEY}`,
     null,
     "GET"
   );
@@ -118,9 +120,7 @@ const handleUpdates = async () => {
   for (const update of result.result) {
     lastUpdateId = update.update_id;
 
-    if (!update.callback_query) {
-      continue;
-    }
+    if (!update.callback_query) continue;
 
     const callback = update.callback_query;
     const action = callback.data;
