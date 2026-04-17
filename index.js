@@ -35,6 +35,7 @@ const sendRequest = (hostname, path, data = null, method = "GET") => {
         try {
           resolve(JSON.parse(responseData));
         } catch (error) {
+          console.error("PARSE ERROR:", responseData);
           reject(error);
         }
       });
@@ -42,10 +43,7 @@ const sendRequest = (hostname, path, data = null, method = "GET") => {
 
     req.on("error", reject);
 
-    if (body) {
-      req.write(body);
-    }
-
+    if (body) req.write(body);
     req.end();
   });
 };
@@ -84,7 +82,7 @@ const answerCallbackQuery = async (callbackQueryId, text) => {
 };
 
 const getCryptoNews = async () => {
-  const query = encodeURIComponent("crypto OR bitcoin OR ethereum");
+  const query = encodeURIComponent("crypto");
 
   const result = await sendRequest(
     "newsapi.org",
@@ -92,6 +90,8 @@ const getCryptoNews = async () => {
     null,
     "GET"
   );
+
+  console.log("NEWS RESULT:", JSON.stringify(result));
 
   if (!result.articles || !result.articles.length) {
     throw new Error("No crypto news found");
@@ -113,9 +113,7 @@ const buildDraftText = (article) => {
 const handleUpdates = async () => {
   const result = await telegramRequest(`/getUpdates?offset=${lastUpdateId + 1}`);
 
-  if (!result.ok || !result.result || !result.result.length) {
-    return;
-  }
+  if (!result.ok || !result.result || !result.result.length) return;
 
   for (const update of result.result) {
     lastUpdateId = update.update_id;
