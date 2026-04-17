@@ -2,10 +2,18 @@ const https = require("https");
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
 
-const sendMessage = (chatId, text) => {
+const sendMessageWithButtons = (chatId, text) => {
   const data = JSON.stringify({
     chat_id: chatId,
     text: text,
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "✅ Опублікувати", callback_data: "publish" },
+          { text: "❌ Відхилити", callback_data: "reject" },
+        ],
+      ],
+    },
   });
 
   const options = {
@@ -39,3 +47,8 @@ const sendMessage = (chatId, text) => {
 };
 
 console.log("Bot started");
+
+// ТЕСТ — відправка тобі з кнопками
+setTimeout(() => {
+  sendMessageWithButtons("-1003675505328", "📰 Нова новина:\n\nТут буде текст від ІІ");
+}, 5000);
