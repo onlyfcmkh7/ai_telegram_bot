@@ -693,7 +693,7 @@ const apiServer = http.createServer(async (req, res) => {
     return sendJson(res, 200, {
       ok: true,
       service: "ai-telegram-bot",
-      endpoints: ["/draft/current", "/draft/test"],
+      endpoints: ["/draft/current", "/draft/test", "/draft/reject", "/draft/publish"],
     });
   }
 
@@ -729,6 +729,46 @@ const apiServer = http.createServer(async (req, res) => {
       return sendJson(res, 500, {
         ok: false,
         error: error.message || "Failed to create test draft",
+      });
+    }
+  }
+
+  if (req.method === "POST" && req.url === "/draft/reject") {
+    try {
+      if (!currentSlot || currentSlot.completed) {
+        currentSlot = {
+          slotKey: "manual_reject_slot",
+          dateKey: "manual_reject_date",
+          timeLabel: "MANUAL",
+          attempts: 0,
+          completed: false,
+          pendingId: null,
+          article: null,
+          text: null,
+        };
+      }
+
+      if (currentDraft) {
+        currentDraft.status = "rejected";
+        currentDraft.rejectedAt = new Date().toISOString();
+      }
+
+      currentSlot.pendingId = null;
+      currentSlot.article = null;
+      currentSlot.text = null;
+
+      await sendDraft({ silent: true });
+
+      return sendJson(res, 200, {
+        ok: true,
+        message: "New draft created",
+        draft: currentDraft,
+      });
+    } catch (error) {
+      console.error("POST /draft/reject error:", error);
+      return sendJson(res, 500, {
+        ok: false,
+        message: error.message || "Reject failed",
       });
     }
   }
