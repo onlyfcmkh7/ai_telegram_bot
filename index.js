@@ -1,18 +1,20 @@
 const https = require("https");
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
+const NEWS_API_KEY = process.env.NEWS_API_KEY;
+
 const PRIVATE_CHAT_ID = "978193902";
 const CHANNEL_CHAT_ID = "-1003675505328";
 
 let lastUpdateId = 0;
 
-const sendRequest = (path, data = null, method = "GET") => {
+const sendRequest = (hostname, path, data = null, method = "GET") => {
   return new Promise((resolve, reject) => {
     const body = data ? JSON.stringify(data) : null;
 
     const options = {
-      hostname: "api.telegram.org",
-      path: `/bot${TOKEN}${path}`,
+      hostname,
+      path,
       method,
       headers: body
         ? {
@@ -32,17 +34,24 @@ const sendRequest = (path, data = null, method = "GET") => {
       res.on("end", () => {
         try {
           resolve(JSON.parse(responseData));
-        } catch (e) {
-          reject(e);
+        } catch (error) {
+          reject(error);
         }
       });
     });
 
     req.on("error", reject);
 
-    if (body) req.write(body);
+    if (body) {
+      req.write(body);
+    }
+
     req.end();
   });
+};
+
+const telegramRequest = (path, data = null, method = "GET") => {
+  return sendRequest("api.telegram.org", `/bot${TOKEN}${path}`, data, method);
 };
 
 const sendMessage = async (chatId, text, buttons = null) => {
@@ -57,12 +66,12 @@ const sendMessage = async (chatId, text, buttons = null) => {
     };
   }
 
-  const result = await sendRequest("/sendMessage", payload, "POST");
+  const result = await telegramRequest("/sendMessage", payload, "POST");
   console.log("sendMessage:", JSON.stringify(result));
 };
 
 const answerCallbackQuery = async (callbackQueryId, text) => {
-  const result = await sendRequest(
+  const result = await telegramRequest(
     "/answerCallbackQuery",
     {
       callback_query_id: callbackQueryId,
@@ -70,42 +79,81 @@ const answerCallbackQuery = async (callbackQueryId, text) => {
     },
     "POST"
   );
+
   console.log("answerCallbackQuery:", JSON.stringify(result));
 };
 
-const handleUpdates = async () => {
-  const result = await sendRequest(`/getUpdates?offset=${lastUpdateId + 1}`);
+const getCryptoNews = async () => {
+  const result = await sendRequest(
+    "newsapi.org",
+    `/v2/everything?q=crypto OR bitcoin OR ethereum&language=en&sortBy=publishedAt&pageSize=1&apiKey=${NEWS_API_KEY}`,
+    null,
+    "GET"
+  );
 
-  if (!result.ok || !result.result.length) return;
+  if (!result.articles || !result.articles.length) {
+    throw new Error("No crypto news found");
+  }
+
+  const article = result.articles[0];
+
+  return {
+    title: article.title || "Без заголовка",
+    description: article.description || "Опис відсутній",
+    url: article.url || "",
+  };
+};
+
+const buildDraftText = (article) => {
+  return `📰 Крипто-новина:\n\n${article.title}\n\n${article.description}\n\nДжерело: ${article.url}`;
+};
+
+const handleUpdates = async () => {
+  const result = await telegramRequest(`/getUpdates?offset=${lastUpdateId + 1}`);
+
+  if (!result.ok || !result.result || !result.result.length) {
+    return;
+  }
 
   for (const update of result.result) {
     lastUpdateId = update.update_id;
 
-    if (update.callback_query) {
-      const callback = update.callback_query;
-      const action = callback.data;
-      const callbackId = callback.id;
-      const draftText = callback.message.text;
+    if (!update.callback_query) {
+      continue;
+    }
 
-      if (action === "publish") {
-        await sendMessage(CHANNEL_CHAT_ID, draftText);
-        await answerCallbackQuery(callbackId, "Опубліковано в канал ✅");
-      }
+    const callback = update.callback_query;
+    const action = callback.data;
+    const callbackId = callback.id;
+    const draftText = callback.message.text;
 
-      if (action === "reject") {
-        await answerCallbackQuery(callbackId, "Відхилено ❌");
-      }
+    if (action === "publish") {
+      await sendMessage(CHANNEL_CHAT_ID, draftText);
+      await answerCallbackQuery(callbackId, "Опубліковано в канал ✅");
+    }
+
+    if (action === "reject") {
+      await answerCallbackQuery(callbackId, "Відхилено ❌");
     }
   }
+};
+
+const sendCryptoDraftToPrivate = async () => {
+  const article = await getCryptoNews();
+  const draftText = buildDraftText(article);
+
+  await sendMessage(PRIVATE_CHAT_ID, draftText, [
+    { text: "✅ Опублікувати", callback_data: "publish" },
+    { text: "❌ Відхилити", callback_data: "reject" },
+  ]);
 };
 
 console.log("Bot started");
 
 setTimeout(() => {
-  sendMessage(PRIVATE_CHAT_ID, "📰 Нова новина:\n\nТут буде текст від ІІ", [
-    { text: "✅ Опублікувати", callback_data: "publish" },
-    { text: "❌ Відхилити", callback_data: "reject" },
-  ]);
+  sendCryptoDraftToPrivate().catch((error) => {
+    console.error("sendCryptoDraftToPrivate error:", error);
+  });
 }, 5000);
 
 setInterval(() => {
