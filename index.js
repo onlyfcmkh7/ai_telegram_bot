@@ -103,7 +103,6 @@ const getCryptoNews = async () => {
   };
 };
 
-// 🔥 ПЕРЕКЛАД
 const translateToUkrainian = async (text) => {
   const query = encodeURIComponent(text);
 
@@ -121,7 +120,7 @@ const buildDraftText = async (article) => {
   const title = await translateToUkrainian(article.title);
   const description = await translateToUkrainian(article.description);
 
-  return `📰 Крипто-новина:\n\n${title}\n\n${description}\n\nДжерело: ${article.url}`;
+  return `📰 Крипто-новина:\n\n${title}\n\n${description}`;
 };
 
 const handleUpdates = async () => {
