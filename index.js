@@ -9,7 +9,7 @@ const PRIVATE_CHAT_ID = "978193902";
 const CHANNEL_CHAT_ID = "-1003675505328";
 
 const TIMEZONE = "Europe/Kyiv";
-const SCHEDULE_TIMES = ["11:00", "14:00", "18:00"];
+const SCHEDULE_TIMES = ["11:00", "14:00", "18:50"];
 const MAX_ATTEMPTS_PER_SLOT = 5;
 const NEWS_PAGE_SIZE = 15;
 const STATE_FILE = path.join(__dirname, "bot_state.json");
