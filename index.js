@@ -2,6 +2,7 @@ const https = require("https");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const cheerio = require("cheerio");
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
@@ -10,7 +11,7 @@ const PORT = Number(process.env.PORT || 3000);
 const CHANNEL_CHAT_ID = "-1003675505328";
 
 const TIMEZONE = "Europe/Kyiv";
-const SCHEDULE_TIMES = ["11:00", "14:00", "14:16"];
+const SCHEDULE_TIMES = ["11:00", "14:00", "18:00"];
 
 const MAX_ATTEMPTS_PER_SLOT = 5;
 const NEWS_PAGE_SIZE = 30;
@@ -144,6 +145,14 @@ function stripHtml(text) {
   return String(text || "")
     .replace(/<[^>]*>/g, " ")
     .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanupArticleText(text) {
+  return stripHtml(text)
+    .replace(/\s*\[\+\d+\s+chars\]\s*$/i, "")
+    .replace(/\s*\+\d+\s+chars\s*$/i, "")
+    .replace(/\s*Continue reading.*$/i, "")
     .trim();
 }
 
@@ -298,6 +307,54 @@ function sendRequest(hostname, pathValue, data = null, method = "GET") {
 
     if (body) req.write(body);
     req.end();
+  });
+}
+
+function fetchUrl(rawUrl) {
+  return new Promise((resolve, reject) => {
+    try {
+      const url = new URL(rawUrl);
+      const client = url.protocol === "http:" ? http : https;
+
+      const req = client.get(
+        rawUrl,
+        {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
+        },
+        (res) => {
+          if (
+            res.statusCode >= 300 &&
+            res.statusCode < 400 &&
+            res.headers.location
+          ) {
+            const nextUrl = new URL(res.headers.location, rawUrl).toString();
+            return resolve(fetchUrl(nextUrl));
+          }
+
+          let data = "";
+
+          res.on("data", (chunk) => {
+            data += chunk;
+          });
+
+          res.on("end", () => {
+            resolve(data);
+          });
+        }
+      );
+
+      req.on("error", reject);
+
+      req.setTimeout(15000, () => {
+        req.destroy(new Error("Request timeout"));
+      });
+    } catch (error) {
+      reject(error);
+    }
   });
 }
 
@@ -500,6 +557,58 @@ function isGoodCryptoArticle(article) {
   return scoreArticle(article) >= 4;
 }
 
+/* ================= ARTICLE PARSING ================= */
+
+async function fetchFullArticleText(articleUrl) {
+  try {
+    const html = await fetchUrl(articleUrl);
+    if (!html) return "";
+
+    const $ = cheerio.load(html);
+
+    $("script, style, noscript, iframe, header, footer, nav, aside, form").remove();
+
+    const selectors = [
+      "article",
+      "[role='article']",
+      ".article-content",
+      ".post-content",
+      ".entry-content",
+      ".article__content",
+      ".story-body",
+      ".content__article-body",
+      ".c-article-content",
+      ".article-body",
+      "main",
+    ];
+
+    let bestText = "";
+
+    for (const selector of selectors) {
+      const text = cleanupArticleText($(selector).text());
+      if (text.length > bestText.length) {
+        bestText = text;
+      }
+    }
+
+    const paragraphsText = cleanupArticleText(
+      $("p")
+        .map((_, el) => $(el).text())
+        .get()
+        .join("\n\n")
+    );
+
+    if (paragraphsText.length > bestText.length) {
+      bestText = paragraphsText;
+    }
+
+    return bestText;
+  } catch (error) {
+    console.error("fetchFullArticleText error:", error);
+    return "";
+  }
+}
+
 /* ================= NEWS ================= */
 
 async function getNews() {
@@ -526,8 +635,9 @@ async function getNews() {
     .filter((a) => a && a.url && a.title)
     .map((a) => ({
       title: cleanupTitle(a.title || "Без заголовка"),
-      description: stripHtml(a.description || ""),
-      fullText: stripHtml(a.content || a.description || ""),
+      description: cleanupArticleText(a.description || ""),
+      contentPreview: cleanupArticleText(a.content || ""),
+      fullText: "",
       url: normalizeUrl(a.url || ""),
       publishedAt: a.publishedAt || "",
       sourceName: a.source?.name || "",
@@ -572,12 +682,18 @@ async function translate(text) {
 
 async function buildDraft(article) {
   const translatedTitle = await translate(article.title);
-  const sourceText = article.fullText || article.description || "";
+
+  let sourceText = await fetchFullArticleText(article.url);
+
+  if (!sourceText || sourceText.length < 300) {
+    sourceText = article.contentPreview || article.description || "";
+  }
+
   const translatedText = sourceText ? await translate(sourceText) : "";
 
   return {
     title: cleanupTitle(translatedTitle || article.title),
-    text: stripHtml(translatedText || sourceText),
+    text: cleanupArticleText(translatedText || sourceText),
   };
 }
 
@@ -626,7 +742,9 @@ async function createDraftForCurrentSlot() {
     console.error("buildDraft error:", error);
     draftContent = {
       title: cleanupTitle(article.title),
-      text: stripHtml(article.fullText || article.description || ""),
+      text: cleanupArticleText(
+        article.contentPreview || article.description || ""
+      ),
     };
   }
 
