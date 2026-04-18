@@ -100,17 +100,20 @@ function isSeen(url) {
 
 function markSeen(url) {
   const normalized = normalizeUrl(url);
-  if (!normalized) return;
+  if (!normalized) return false;
 
   if (!state.seenUrls.includes(normalized)) {
     state.seenUrls.push(normalized);
 
-    if (state.seenUrls.length > 1000) {
-      state.seenUrls = state.seenUrls.slice(-1000);
+    if (state.seenUrls.length > 5000) {
+      state.seenUrls = state.seenUrls.slice(-5000);
     }
 
     saveState();
+    return true;
   }
+
+  return false;
 }
 
 function nextDraftId() {
@@ -273,6 +276,11 @@ function slotKeyForTime(dateKey, timeLabel) {
 
 function isScheduledTime(timeLabel) {
   return SCHEDULE_TIMES.includes(timeLabel);
+}
+
+function textContainsCrypto(text = "") {
+  const t = cleanupTitle(text).toLowerCase();
+  return CRYPTO_KEYWORDS.some((word) => t.includes(word));
 }
 
 /* ================= REQUEST ================= */
@@ -524,6 +532,9 @@ const CRYPTO_KEYWORDS = [
   "circle",
   "world id",
   "worldcoin",
+  "ethereum foundation",
+  "charles schwab crypto",
+  "kalshi",
 ];
 
 const BAD_KEYWORDS = [
@@ -538,11 +549,14 @@ const BAD_KEYWORDS = [
   "штучний інтелект",
   "mythos",
   "opus 4.7",
+  "ai-агент",
+  "ai агент",
+  "llm",
 ];
 
 function isCryptoTitle(title = "") {
   const t = cleanupTitle(title).toLowerCase();
-  if (!t || t.length < 25) return false;
+  if (!t || t.length < 20) return false;
 
   if (BAD_KEYWORDS.some((word) => t.includes(word))) {
     return false;
@@ -573,27 +587,57 @@ async function fetchIncryptedNewsList() {
     const $ = cheerio.load(html);
     const items = [];
 
-    $("a[href]").each((_, el) => {
+    const scopedLinks = new Set();
+
+    $("h1, h2, h3").each((_, el) => {
+      const headingText = cleanupTitle($(el).text()).toLowerCase();
+      if (!headingText.includes("последние новости") && !headingText.includes("останні новини")) {
+        return;
+      }
+
+      let container = $(el).parent();
+      if (!container.length) {
+        container = $(el);
+      }
+
+      container.find("a[href]").each((__, linkEl) => {
+        scopedLinks.add(linkEl);
+      });
+
+      container.nextAll().slice(0, 8).each((__, nextEl) => {
+        $(nextEl).find("a[href]").each((___, linkEl) => {
+          scopedLinks.add(linkEl);
+        });
+      });
+    });
+
+    if (scopedLinks.size === 0) {
+      $("main a[href], section a[href]").each((_, el) => {
+        scopedLinks.add(el);
+      });
+    }
+
+    for (const el of scopedLinks) {
       const href = $(el).attr("href");
       const title =
         cleanupTitle($(el).attr("title")) ||
         cleanupTitle($(el).text());
 
-      if (!href || !title) return;
+      if (!href || !title) continue;
 
       const url = new URL(href, INCRYPTED_NEWS_URL).toString();
       const normalizedUrl = normalizeUrl(url);
 
-      if (!/incrypted\.com\/ua\//i.test(normalizedUrl)) return;
-      if (/\/ua\/novyny\/?$/.test(normalizedUrl)) return;
-      if (!isCryptoTitle(title)) return;
+      if (!/incrypted\.com\/ua\//i.test(normalizedUrl)) continue;
+      if (/\/ua\/novyny\/?$/.test(normalizedUrl)) continue;
+      if (!isCryptoTitle(title)) continue;
 
       items.push({
         sourceName: "Incrypted",
         title,
         url: normalizedUrl,
       });
-    });
+    }
 
     return dedupeArticles(items).slice(0, 30);
   } catch (error) {
@@ -608,11 +652,15 @@ async function fetchForklogNewsList() {
     const $ = cheerio.load(html);
     const items = [];
 
-    $("a[href]").each((_, el) => {
-      const href = $(el).attr("href");
+    $("article, .post, .news-item, .td_module_wrap").each((_, el) => {
+      const linkEl = $(el).find("a[href]").first();
+      const href = linkEl.attr("href");
+
       const title =
-        cleanupTitle($(el).attr("title")) ||
-        cleanupTitle($(el).text());
+        cleanupTitle($(el).find("h2").first().text()) ||
+        cleanupTitle($(el).find("h3").first().text()) ||
+        cleanupTitle(linkEl.attr("title")) ||
+        cleanupTitle(linkEl.text());
 
       if (!href || !title) return;
 
@@ -629,6 +677,30 @@ async function fetchForklogNewsList() {
         url: normalizedUrl,
       });
     });
+
+    if (items.length === 0) {
+      $("main a[href]").each((_, el) => {
+        const href = $(el).attr("href");
+        const title =
+          cleanupTitle($(el).attr("title")) ||
+          cleanupTitle($(el).text());
+
+        if (!href || !title) return;
+
+        const url = new URL(href, FORKLOG_NEWS_URL).toString();
+        const normalizedUrl = normalizeUrl(url);
+
+        if (!/forklog\.com\.ua\//i.test(normalizedUrl)) return;
+        if (/\/news\/?$/.test(normalizedUrl)) return;
+        if (!isCryptoTitle(title)) return;
+
+        items.push({
+          sourceName: "ForkLog UA",
+          title,
+          url: normalizedUrl,
+        });
+      });
+    }
 
     return dedupeArticles(items).slice(0, 30);
   } catch (error) {
@@ -701,7 +773,7 @@ async function buildDraftFromUrl(item) {
     return null;
   }
 
-  if (!isCryptoTitle(finalTitle)) {
+  if (!isCryptoTitle(finalTitle) && !textContainsCrypto(finalText.slice(0, 1000))) {
     return null;
   }
 
@@ -727,9 +799,12 @@ async function buildNextDraft() {
       const draft = await buildDraftFromUrl(item);
       if (draft) {
         return draft;
+      } else {
+        markSeen(item.url);
       }
     } catch (error) {
       console.error("buildNextDraft item error:", item.url, error.message);
+      markSeen(item.url);
     }
   }
 
