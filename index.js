@@ -249,6 +249,7 @@ function parseRequestBody(req) {
 function buildTelegramHtml(title, text, sourceUrl = "") {
   const finalTitle = cleanupTitle(title);
   const finalText = stripHtml(text);
+  const finalSourceUrl = normalizeUrl(sourceUrl);
 
   let result = "";
 
@@ -260,8 +261,8 @@ function buildTelegramHtml(title, text, sourceUrl = "") {
     result += `${result ? "\n\n" : ""}${escapeHtml(finalText)}`;
   }
 
-  if (sourceUrl) {
-    result += `${result ? "\n\n" : ""}<a href="${escapeHtml(sourceUrl)}">Джерело</a>`;
+  if (finalSourceUrl) {
+    result += `${result ? "\n\n" : ""}<a href="${escapeHtml(finalSourceUrl)}">Джерело</a>`;
   }
 
   return result.trim();
@@ -270,7 +271,7 @@ function buildTelegramHtml(title, text, sourceUrl = "") {
 function getTelegramTextLength(html) {
   const visibleText = decodeHtmlEntities(
     String(html || "").replace(/<[^>]*>/g, "")
-  ).replace(/\s+/g, " ").trim();
+  );
 
   return visibleText.length;
 }
@@ -968,9 +969,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/draft/publish") {
       const body = await parseRequestBody(req);
 
-      const title = cleanupTitle(body.title || currentDraft?.title || "");
-      const text = cleanupArticleText(body.text || currentDraft?.text || "");
-      const sourceUrl = normalizeUrl(currentDraft?.url || "");
+      const title = cleanupTitle(
+        body.title !== undefined ? body.title : (currentDraft?.title || "")
+      );
+
+      const text = cleanupArticleText(
+        body.text !== undefined ? body.text : (currentDraft?.text || "")
+      );
+
+      const sourceUrl = normalizeUrl(
+        body.sourceUrl !== undefined ? body.sourceUrl : (currentDraft?.url || "")
+      );
+
       const imageBase64 = sanitizeBase64(body.imageBase64 || "");
       const imageMimeType = String(body.imageMimeType || "image/jpeg");
 
