@@ -7,7 +7,6 @@ const { JSDOM } = require("jsdom");
 const { Readability } = require("@mozilla/readability");
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
-const NEWS_API_KEY = process.env.NEWS_API_KEY;
 const PORT = Number(process.env.PORT || 3000);
 
 const CHANNEL_CHAT_ID = "-1003675505328";
@@ -16,13 +15,10 @@ const TIMEZONE = "Europe/Kyiv";
 const SCHEDULE_TIMES = ["11:00", "14:00", "18:00"];
 
 const MAX_ATTEMPTS_PER_SLOT = 5;
-const NEWS_PAGE_SIZE = 30;
 const STATE_FILE = path.join(__dirname, "bot_state.json");
 
-const LIBRETRANSLATE_URL =
-  process.env.LIBRETRANSLATE_URL || "http://127.0.0.1:5000/translate";
-const SOURCE_LANG = process.env.SOURCE_LANG || "auto";
-const TARGET_LANG = process.env.TARGET_LANG || "uk";
+const INCRYPTED_NEWS_URL = "https://incrypted.com/ua/novyny/";
+const FORKLOG_NEWS_URL = "https://forklog.com.ua/news";
 
 let currentSlot = null;
 let currentDraft = null;
@@ -162,6 +158,8 @@ function cleanupArticleText(text) {
     .replace(/\+\d+\s*chars/gi, "")
     .replace(/Continue reading.*/gi, "")
     .replace(/Read more.*/gi, "")
+    .replace(/Читайте также.*/gi, "")
+    .replace(/Читати далі.*/gi, "")
     .trim();
 }
 
@@ -277,39 +275,6 @@ function isScheduledTime(timeLabel) {
   return SCHEDULE_TIMES.includes(timeLabel);
 }
 
-function splitTextIntoChunks(text, maxLen = 450) {
-  const cleaned = String(text || "").replace(/\s+/g, " ").trim();
-  if (!cleaned) return [];
-
-  const sentences = cleaned.match(/[^.!?]+[.!?]?/g) || [cleaned];
-  const chunks = [];
-  let current = "";
-
-  for (const part of sentences) {
-    const sentence = part.trim();
-    if (!sentence) continue;
-
-    if (!current) {
-      current = sentence;
-      continue;
-    }
-
-    const candidate = `${current} ${sentence}`.trim();
-    if (candidate.length <= maxLen) {
-      current = candidate;
-    } else {
-      chunks.push(current);
-      current = sentence;
-    }
-  }
-
-  if (current) {
-    chunks.push(current);
-  }
-
-  return chunks;
-}
-
 /* ================= REQUEST ================= */
 
 function sendRequest(hostname, pathValue, data = null, method = "GET") {
@@ -352,56 +317,6 @@ function sendRequest(hostname, pathValue, data = null, method = "GET") {
   });
 }
 
-function postJsonAbsolute(rawUrl, data = {}) {
-  return new Promise((resolve, reject) => {
-    try {
-      const url = new URL(rawUrl);
-      const body = JSON.stringify(data);
-      const client = url.protocol === "http:" ? http : https;
-
-      const req = client.request(
-        {
-          hostname: url.hostname,
-          port: url.port || (url.protocol === "http:" ? 80 : 443),
-          path: `${url.pathname}${url.search}`,
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Content-Length": Buffer.byteLength(body),
-            "User-Agent": "ai-telegram-bot",
-          },
-        },
-        (res) => {
-          let responseData = "";
-
-          res.on("data", (chunk) => {
-            responseData += chunk;
-          });
-
-          res.on("end", () => {
-            try {
-              const parsed = JSON.parse(responseData);
-              resolve(parsed);
-            } catch (error) {
-              console.error("postJsonAbsolute parse error:", responseData);
-              reject(error);
-            }
-          });
-        }
-      );
-
-      req.on("error", reject);
-      req.setTimeout(20000, () => {
-        req.destroy(new Error("Request timeout"));
-      });
-      req.write(body);
-      req.end();
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
 function fetchUrl(rawUrl, redirectCount = 0) {
   return new Promise((resolve, reject) => {
     try {
@@ -418,7 +333,7 @@ function fetchUrl(rawUrl, redirectCount = 0) {
           headers: {
             "User-Agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7",
           },
         },
         (res) => {
@@ -565,220 +480,172 @@ async function sendPhotoToTelegram(chatId, captionHtml, imageBuffer, mimeType) {
   return result;
 }
 
-/* ================= NEWS FILTER ================= */
+/* ================= SOURCES ================= */
 
-const POSITIVE_KEYWORDS = [
-  "crypto",
-  "cryptocurrency",
-  "bitcoin",
-  "btc",
-  "ethereum",
-  "eth",
-  "solana",
-  "sol",
-  "binance",
-  "coinbase",
-  "blockchain",
-  "web3",
-  "defi",
-  "stablecoin",
-  "stablecoins",
-  "token",
-  "tokens",
-  "altcoin",
-  "altcoins",
-  "etf",
-  "xrp",
-  "dogecoin",
-  "ton",
-  "tron",
-  "kraken",
-  "metamask",
-];
+async function fetchIncryptedNewsList() {
+  try {
+    const html = await fetchUrl(INCRYPTED_NEWS_URL);
+    const $ = cheerio.load(html);
+    const items = [];
 
-const NEGATIVE_KEYWORDS = [
-  "app store",
-  "iphone",
-  "ios",
-  "android app",
-  "virus protection",
-  "scammer",
-  "scam app",
-  "anthropic",
-  "claude",
-  "pypi",
-  "sdk",
-  "railroad commissioner",
-  "iran",
-  "lebanon",
-  "hezbollah",
-  "ceasefire",
-  "uranium",
-  "import prices",
-  "biden pardons",
-  "doha",
-  "trump dismisses",
-];
+    $("a[href]").each((_, el) => {
+      const href = $(el).attr("href");
+      const title = cleanupTitle($(el).text());
 
-function scoreArticle(article) {
-  const haystack = `${article.title || ""} ${article.description || ""}`.toLowerCase();
-  let score = 0;
+      if (!href || !title) return;
 
-  for (const word of POSITIVE_KEYWORDS) {
-    if (haystack.includes(word)) score += 2;
+      const url = new URL(href, INCRYPTED_NEWS_URL).toString();
+      if (!/incrypted\.com\/ua\//i.test(url)) return;
+      if (url === INCRYPTED_NEWS_URL) return;
+      if (/\/ua\/novyny\/?$/.test(url)) return;
+      if (title.length < 25) return;
+
+      items.push({
+        sourceName: "Incrypted",
+        title,
+        url: normalizeUrl(url),
+      });
+    });
+
+    return dedupeArticles(items).slice(0, 30);
+  } catch (error) {
+    console.error("fetchIncryptedNewsList error:", error.message);
+    return [];
+  }
+}
+
+async function fetchForklogNewsList() {
+  try {
+    const html = await fetchUrl(FORKLOG_NEWS_URL);
+    const $ = cheerio.load(html);
+    const items = [];
+
+    $("a[href]").each((_, el) => {
+      const href = $(el).attr("href");
+      const title = cleanupTitle($(el).text());
+
+      if (!href || !title) return;
+
+      const url = new URL(href, FORKLOG_NEWS_URL).toString();
+      if (!/forklog\.com\.ua\//i.test(url)) return;
+      if (url === FORKLOG_NEWS_URL) return;
+      if (/\/news\/?$/.test(url)) return;
+      if (title.length < 25) return;
+
+      items.push({
+        sourceName: "ForkLog UA",
+        title,
+        url: normalizeUrl(url),
+      });
+    });
+
+    return dedupeArticles(items).slice(0, 30);
+  } catch (error) {
+    console.error("fetchForklogNewsList error:", error.message);
+    return [];
+  }
+}
+
+function dedupeArticles(items) {
+  const seen = new Set();
+  const result = [];
+
+  for (const item of items) {
+    const key = normalizeUrl(item.url);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
   }
 
-  for (const word of NEGATIVE_KEYWORDS) {
-    if (haystack.includes(word)) score -= 5;
-  }
-
-  if (haystack.includes("bitcoin")) score += 3;
-  if (haystack.includes("ethereum")) score += 3;
-  if (haystack.includes("crypto")) score += 3;
-  if (haystack.includes("blockchain")) score += 2;
-  if (haystack.includes("etf")) score += 2;
-
-  return score;
+  return result;
 }
 
-function isGoodCryptoArticle(article) {
-  if (!article) return false;
+async function fetchAllNews() {
+  const [incrypted, forklog] = await Promise.all([
+    fetchIncryptedNewsList(),
+    fetchForklogNewsList(),
+  ]);
 
-  const title = String(article.title || "").trim();
-  const description = String(article.description || "").trim();
-  const url = String(article.url || "").trim();
-
-  if (!title || !url) return false;
-  if (title === "[Removed]") return false;
-
-  return scoreArticle(article) > 0 || /bitcoin|ethereum|crypto|blockchain|etf|xrp|solana/i.test(`${title} ${description}`);
+  const merged = dedupeArticles([...incrypted, ...forklog]);
+  return merged.filter((item) => !isSeen(item.url));
 }
 
-/* ================= NEWS ================= */
-
-async function fetchNews() {
-  const q = encodeURIComponent(
-    "crypto OR cryptocurrency OR bitcoin OR ethereum OR blockchain OR ETF OR XRP OR Solana"
-  );
-
-  const pathValue =
-    `/v2/everything?q=${q}` +
-    `&language=en` +
-    `&sortBy=publishedAt` +
-    `&pageSize=${NEWS_PAGE_SIZE}` +
-    `&apiKey=${NEWS_API_KEY}`;
-
-  const data = await sendRequest("newsapi.org", pathValue, null, "GET");
-  const articles = Array.isArray(data.articles) ? data.articles : [];
-
-  return articles.filter(isGoodCryptoArticle).sort((a, b) => scoreArticle(b) - scoreArticle(a));
-}
-
-async function extractArticleText(url) {
+async function extractArticle(url) {
   try {
     const html = await fetchUrl(url);
     const dom = new JSDOM(html, { url });
     const reader = new Readability(dom.window.document);
     const parsed = reader.parse();
 
-    if (parsed?.textContent) {
-      return cleanupArticleText(parsed.textContent);
-    }
+    let title = cleanupTitle(parsed?.title || "");
+    let text = cleanupArticleText(parsed?.textContent || "");
 
-    const $ = cheerio.load(html);
-    const fallbackText = $("article").text() || $("body").text() || "";
-    return cleanupArticleText(fallbackText);
-  } catch (error) {
-    console.error("extractArticleText error:", url, error.message);
-    return "";
-  }
-}
+    if (!title || !text) {
+      const $ = cheerio.load(html);
 
-/* ================= TRANSLATE ================= */
+      if (!title) {
+        title =
+          cleanupTitle($("meta[property='og:title']").attr("content")) ||
+          cleanupTitle($("title").text()) ||
+          cleanupTitle($("h1").first().text());
+      }
 
-async function libreTranslate(text) {
-  const clean = String(text || "").trim();
-  if (!clean) return "";
-
-  const data = await postJsonAbsolute(LIBRETRANSLATE_URL, {
-    q: clean,
-    source: SOURCE_LANG,
-    target: TARGET_LANG,
-    format: "text",
-  });
-
-  return String(data?.translatedText || "").trim();
-}
-
-async function safeTranslateText(text) {
-  const clean = String(text || "").trim();
-  if (!clean) return "";
-
-  try {
-    const chunks = splitTextIntoChunks(clean, 450);
-    if (!chunks.length) return "";
-
-    const translated = [];
-    for (const chunk of chunks) {
-      try {
-        const t = await libreTranslate(chunk);
-        translated.push(t || chunk);
-      } catch (error) {
-        console.error("Chunk translation failed:", error.message);
-        translated.push(chunk);
+      if (!text) {
+        text =
+          cleanupArticleText($("article").text()) ||
+          cleanupArticleText($("main").text()) ||
+          cleanupArticleText($("body").text());
       }
     }
 
-    return translated.join(" ").replace(/\s+/g, " ").trim();
+    return { title, text };
   } catch (error) {
-    console.error("safeTranslateText error:", error.message);
-    return clean;
+    console.error("extractArticle error:", url, error.message);
+    return { title: "", text: "" };
   }
 }
 
 /* ================= DRAFT ================= */
 
-async function buildDraftFromArticle(article) {
-  const normalizedUrl = normalizeUrl(article.url);
+async function buildDraftFromUrl(item) {
+  const normalizedUrl = normalizeUrl(item.url);
   if (!normalizedUrl) return null;
   if (isSeen(normalizedUrl)) return null;
 
-  const rawTitle = cleanupTitle(article.title || "");
-  const rawDescription = cleanupArticleText(article.description || "");
-  const fullTextRaw = await extractArticleText(normalizedUrl);
+  const article = await extractArticle(normalizedUrl);
 
-  const baseText = fullTextRaw || rawDescription;
-  if (!rawTitle || !baseText) return null;
+  const finalTitle = cleanupTitle(article.title || item.title || "");
+  const finalText = cleanupArticleText(article.text || "");
 
-  const translatedTitle = await safeTranslateText(rawTitle);
-  const translatedText = await safeTranslateText(baseText);
+  if (!finalTitle || !finalText || finalText.length < 120) {
+    return null;
+  }
 
   return {
     id: nextDraftId(),
-    title: translatedTitle || rawTitle,
-    description: rawDescription,
-    text: translatedText || baseText,
+    title: finalTitle,
+    description: "",
+    text: finalText,
     url: normalizedUrl,
-    imageUrl: article.urlToImage || "",
-    publishedAt: article.publishedAt || "",
-    sourceName: article.source?.name || "",
+    sourceName: item.sourceName || "",
   };
 }
 
 async function buildNextDraft() {
-  const articles = await fetchNews();
+  const items = await fetchAllNews();
 
-  for (const article of articles) {
-    const normalizedUrl = normalizeUrl(article.url);
-    if (!normalizedUrl) continue;
-    if (isSeen(normalizedUrl)) continue;
-    if (currentDraft?.url && normalizeUrl(currentDraft.url) === normalizedUrl) continue;
+  for (const item of items) {
+    if (currentDraft?.url && normalizeUrl(currentDraft.url) === normalizeUrl(item.url)) {
+      continue;
+    }
 
     try {
-      const draft = await buildDraftFromArticle(article);
-      if (draft) return draft;
+      const draft = await buildDraftFromUrl(item);
+      if (draft) {
+        return draft;
+      }
     } catch (error) {
-      console.error("buildNextDraft article error:", normalizedUrl, error.message);
+      console.error("buildNextDraft item error:", item.url, error.message);
     }
   }
 
@@ -801,9 +668,10 @@ async function processScheduledSlot() {
     const { dateKey, timeLabel } = getKyivDateTime();
 
     if (!isScheduledTime(timeLabel)) return;
-    const slotKey = slotKeyForTime(dateKey, timeLabel);
 
+    const slotKey = slotKeyForTime(dateKey, timeLabel);
     if (isSlotProcessed(slotKey)) return;
+
     currentSlot = slotKey;
 
     let attempts = 0;
@@ -858,6 +726,7 @@ const server = http.createServer(async (req, res) => {
         currentDraftId: currentDraft?.id || null,
         currentDraftUrl: currentDraft?.url || null,
         currentSlot,
+        seenCount: state.seenUrls.length,
       });
     }
 
@@ -879,11 +748,20 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && req.url === "/draft/reject") {
-      if (currentDraft?.url) {
-        markSeen(currentDraft.url);
+      const oldUrl = currentDraft?.url || null;
+
+      if (oldUrl) {
+        markSeen(oldUrl);
       }
 
+      currentDraft = null;
       currentDraft = await buildNextDraft();
+
+      console.log("REJECT:", {
+        oldUrl,
+        newUrl: currentDraft?.url || null,
+        seenCount: state.seenUrls.length,
+      });
 
       if (!currentDraft) {
         return sendJson(res, 404, {
