@@ -3,6 +3,8 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const cheerio = require("cheerio");
+const { JSDOM } = require("jsdom");
+const { Readability } = require("@mozilla/readability");
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
@@ -153,6 +155,7 @@ function cleanupArticleText(text) {
     .replace(/\s*\[\+\d+\s+chars\]\s*$/i, "")
     .replace(/\s*\+\d+\s+chars\s*$/i, "")
     .replace(/\s*Continue reading.*$/i, "")
+    .replace(/\s*Read more.*$/i, "")
     .trim();
 }
 
@@ -310,9 +313,13 @@ function sendRequest(hostname, pathValue, data = null, method = "GET") {
   });
 }
 
-function fetchUrl(rawUrl) {
+function fetchUrl(rawUrl, redirectCount = 0) {
   return new Promise((resolve, reject) => {
     try {
+      if (redirectCount > 5) {
+        return reject(new Error("Too many redirects"));
+      }
+
       const url = new URL(rawUrl);
       const client = url.protocol === "http:" ? http : https;
 
@@ -332,7 +339,7 @@ function fetchUrl(rawUrl) {
             res.headers.location
           ) {
             const nextUrl = new URL(res.headers.location, rawUrl).toString();
-            return resolve(fetchUrl(nextUrl));
+            return resolve(fetchUrl(nextUrl, redirectCount + 1));
           }
 
           let data = "";
@@ -559,11 +566,27 @@ function isGoodCryptoArticle(article) {
 
 /* ================= ARTICLE PARSING ================= */
 
-async function fetchFullArticleText(articleUrl) {
+function extractWithReadability(html, url) {
   try {
-    const html = await fetchUrl(articleUrl);
-    if (!html) return "";
+    const dom = new JSDOM(html, { url });
+    const reader = new Readability(dom.window.document);
+    const article = reader.parse();
 
+    if (!article) return "";
+
+    const combined = [article.title, article.excerpt, article.textContent]
+      .filter(Boolean)
+      .join("\n\n");
+
+    return cleanupArticleText(combined);
+  } catch (error) {
+    console.error("extractWithReadability error:", error);
+    return "";
+  }
+}
+
+function extractWithCheerio(html) {
+  try {
     const $ = cheerio.load(html);
 
     $("script, style, noscript, iframe, header, footer, nav, aside, form").remove();
@@ -603,6 +626,28 @@ async function fetchFullArticleText(articleUrl) {
     }
 
     return bestText;
+  } catch (error) {
+    console.error("extractWithCheerio error:", error);
+    return "";
+  }
+}
+
+async function fetchFullArticleText(articleUrl) {
+  try {
+    const html = await fetchUrl(articleUrl);
+    if (!html) return "";
+
+    const readabilityText = extractWithReadability(html, articleUrl);
+    if (readabilityText && readabilityText.length >= 400) {
+      return readabilityText;
+    }
+
+    const cheerioText = extractWithCheerio(html);
+    if (cheerioText && cheerioText.length > readabilityText.length) {
+      return cheerioText;
+    }
+
+    return readabilityText || cheerioText || "";
   } catch (error) {
     console.error("fetchFullArticleText error:", error);
     return "";
