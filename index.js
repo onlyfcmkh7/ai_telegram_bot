@@ -480,7 +480,92 @@ async function sendPhotoToTelegram(chatId, captionHtml, imageBuffer, mimeType) {
   return result;
 }
 
+/* ================= FILTER ================= */
+
+const CRYPTO_KEYWORDS = [
+  "крипто",
+  "криптовал",
+  "біткоїн",
+  "bitcoin",
+  "btc",
+  "ethereum",
+  "eth",
+  "solana",
+  "sol",
+  "xrp",
+  "tron",
+  "ton",
+  "blockchain",
+  "блокчейн",
+  "бірж",
+  "біржа",
+  "token",
+  "токен",
+  "defi",
+  "etf",
+  "kraken",
+  "binance",
+  "coinbase",
+  "usdt",
+  "tether",
+  "stablecoin",
+  "стейблкоїн",
+  "майн",
+  "майнінг",
+  "гаман",
+  "wallet",
+  "nft",
+  "web3",
+  "altcoin",
+  "альткоїн",
+  "мемкоїн",
+  "cardano",
+  "drift protocol",
+  "circle",
+  "world id",
+  "worldcoin",
+];
+
+const BAD_KEYWORDS = [
+  "chatgpt",
+  "openai",
+  "anthropic",
+  "claude",
+  "starbucks",
+  "кав’яр",
+  "кав'яр",
+  "штучного інтелекту",
+  "штучний інтелект",
+  "mythos",
+  "opus 4.7",
+];
+
+function isCryptoTitle(title = "") {
+  const t = cleanupTitle(title).toLowerCase();
+  if (!t || t.length < 25) return false;
+
+  if (BAD_KEYWORDS.some((word) => t.includes(word))) {
+    return false;
+  }
+
+  return CRYPTO_KEYWORDS.some((word) => t.includes(word));
+}
+
 /* ================= SOURCES ================= */
+
+function dedupeArticles(items) {
+  const seen = new Set();
+  const result = [];
+
+  for (const item of items) {
+    const key = normalizeUrl(item.url);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+
+  return result;
+}
 
 async function fetchIncryptedNewsList() {
   try {
@@ -490,20 +575,23 @@ async function fetchIncryptedNewsList() {
 
     $("a[href]").each((_, el) => {
       const href = $(el).attr("href");
-      const title = cleanupTitle($(el).text());
+      const title =
+        cleanupTitle($(el).attr("title")) ||
+        cleanupTitle($(el).text());
 
       if (!href || !title) return;
 
       const url = new URL(href, INCRYPTED_NEWS_URL).toString();
-      if (!/incrypted\.com\/ua\//i.test(url)) return;
-      if (url === INCRYPTED_NEWS_URL) return;
-      if (/\/ua\/novyny\/?$/.test(url)) return;
-      if (title.length < 25) return;
+      const normalizedUrl = normalizeUrl(url);
+
+      if (!/incrypted\.com\/ua\//i.test(normalizedUrl)) return;
+      if (/\/ua\/novyny\/?$/.test(normalizedUrl)) return;
+      if (!isCryptoTitle(title)) return;
 
       items.push({
         sourceName: "Incrypted",
         title,
-        url: normalizeUrl(url),
+        url: normalizedUrl,
       });
     });
 
@@ -522,20 +610,23 @@ async function fetchForklogNewsList() {
 
     $("a[href]").each((_, el) => {
       const href = $(el).attr("href");
-      const title = cleanupTitle($(el).text());
+      const title =
+        cleanupTitle($(el).attr("title")) ||
+        cleanupTitle($(el).text());
 
       if (!href || !title) return;
 
       const url = new URL(href, FORKLOG_NEWS_URL).toString();
-      if (!/forklog\.com\.ua\//i.test(url)) return;
-      if (url === FORKLOG_NEWS_URL) return;
-      if (/\/news\/?$/.test(url)) return;
-      if (title.length < 25) return;
+      const normalizedUrl = normalizeUrl(url);
+
+      if (!/forklog\.com\.ua\//i.test(normalizedUrl)) return;
+      if (/\/news\/?$/.test(normalizedUrl)) return;
+      if (!isCryptoTitle(title)) return;
 
       items.push({
         sourceName: "ForkLog UA",
         title,
-        url: normalizeUrl(url),
+        url: normalizedUrl,
       });
     });
 
@@ -546,20 +637,6 @@ async function fetchForklogNewsList() {
   }
 }
 
-function dedupeArticles(items) {
-  const seen = new Set();
-  const result = [];
-
-  for (const item of items) {
-    const key = normalizeUrl(item.url);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    result.push(item);
-  }
-
-  return result;
-}
-
 async function fetchAllNews() {
   const [incrypted, forklog] = await Promise.all([
     fetchIncryptedNewsList(),
@@ -567,7 +644,10 @@ async function fetchAllNews() {
   ]);
 
   const merged = dedupeArticles([...incrypted, ...forklog]);
-  return merged.filter((item) => !isSeen(item.url));
+
+  return merged
+    .filter((item) => !isSeen(item.url))
+    .filter((item) => isCryptoTitle(item.title));
 }
 
 async function extractArticle(url) {
@@ -618,6 +698,10 @@ async function buildDraftFromUrl(item) {
   const finalText = cleanupArticleText(article.text || "");
 
   if (!finalTitle || !finalText || finalText.length < 120) {
+    return null;
+  }
+
+  if (!isCryptoTitle(finalTitle)) {
     return null;
   }
 
