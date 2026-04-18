@@ -5,7 +5,7 @@ const path = require("path");
 
 const TOKEN = process.env.TELEGRAM_TOKEN;
 const NEWS_API_KEY = process.env.NEWS_API_KEY;
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT || 3000);
 
 const CHANNEL_CHAT_ID = "-1003675505328";
 
@@ -147,22 +147,6 @@ function stripHtml(text) {
     .trim();
 }
 
-function shorten(text, maxLength = 220) {
-  const cleaned = stripHtml(text);
-  if (!cleaned) return "";
-
-  if (cleaned.length <= maxLength) return cleaned;
-
-  const sliced = cleaned.slice(0, maxLength);
-  const lastSpace = sliced.lastIndexOf(" ");
-
-  if (lastSpace > 120) {
-    return `${sliced.slice(0, lastSpace)}…`;
-  }
-
-  return `${sliced}…`;
-}
-
 function cleanupTitle(text) {
   return stripHtml(text)
     .replace(/\s*[-–|]\s*[^-–|]+$/, "")
@@ -224,23 +208,25 @@ function parseRequestBody(req) {
   });
 }
 
-function buildPostHtml(title, text) {
-  const finalTitle = typeof title === "string" ? cleanupTitle(title) : "";
-  const finalText = typeof text === "string" ? stripHtml(text) : "";
+function buildTelegramHtml(title, text, sourceUrl = "") {
+  const finalTitle = cleanupTitle(title);
+  const finalText = stripHtml(text);
 
-  if (finalTitle && finalText) {
-    return `<b>${escapeHtml(finalTitle)}</b>\n\n${escapeHtml(finalText)}`;
-  }
+  let result = "";
 
   if (finalTitle) {
-    return `<b>${escapeHtml(finalTitle)}</b>`;
+    result += `<b>${escapeHtml(finalTitle)}</b>`;
   }
 
   if (finalText) {
-    return escapeHtml(finalText);
+    result += `${result ? "\n\n" : ""}${escapeHtml(finalText)}`;
   }
 
-  return "";
+  if (sourceUrl) {
+    result += `${result ? "\n\n" : ""}<a href="${escapeHtml(sourceUrl)}">Джерело</a>`;
+  }
+
+  return result.trim();
 }
 
 function getExtensionFromMime(mimeType) {
@@ -265,9 +251,17 @@ function sanitizeBase64(input) {
   return raw;
 }
 
+function slotKeyForTime(dateKey, timeLabel) {
+  return `${dateKey}_${timeLabel}`;
+}
+
+function isScheduledTime(timeLabel) {
+  return SCHEDULE_TIMES.includes(timeLabel);
+}
+
 /* ================= REQUEST ================= */
 
-const sendRequest = (hostname, pathValue, data = null, method = "GET") => {
+function sendRequest(hostname, pathValue, data = null, method = "GET") {
   return new Promise((resolve, reject) => {
     const body = data ? JSON.stringify(data) : null;
 
@@ -305,11 +299,11 @@ const sendRequest = (hostname, pathValue, data = null, method = "GET") => {
     if (body) req.write(body);
     req.end();
   });
-};
+}
 
-const tg = (pathValue, data = null, method = "GET") => {
+function tg(pathValue, data = null, method = "GET") {
   return sendRequest("api.telegram.org", `/bot${TOKEN}${pathValue}`, data, method);
-};
+}
 
 function telegramMultipartRequest(methodName, fields = {}, file = null) {
   return new Promise((resolve, reject) => {
@@ -318,9 +312,7 @@ function telegramMultipartRequest(methodName, fields = {}, file = null) {
 
     const appendField = (name, value) => {
       chunks.push(Buffer.from(`--${boundary}\r\n`));
-      chunks.push(
-        Buffer.from(`Content-Disposition: form-data; name="${name}"\r\n\r\n`)
-      );
+      chunks.push(Buffer.from(`Content-Disposition: form-data; name="${name}"\r\n\r\n`));
       chunks.push(Buffer.from(String(value)));
       chunks.push(Buffer.from("\r\n"));
     };
@@ -383,22 +375,24 @@ function telegramMultipartRequest(methodName, fields = {}, file = null) {
   });
 }
 
-/* ================= TELEGRAM PUBLISH ================= */
+/* ================= TELEGRAM ================= */
 
-const sendMessage = async (chatId, text) => {
+async function sendMessage(chatId, text) {
   const payload = {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
+    disable_web_page_preview: false,
   };
 
   const result = await tg("/sendMessage", payload, "POST");
   console.log("sendMessage:", JSON.stringify(result));
   return result;
-};
+}
 
-const sendPhotoToTelegram = async (chatId, captionHtml, imageBuffer, mimeType) => {
+async function sendPhotoToTelegram(chatId, captionHtml, imageBuffer, mimeType) {
   const ext = getExtensionFromMime(mimeType);
+
   const result = await telegramMultipartRequest(
     "sendPhoto",
     {
@@ -416,7 +410,7 @@ const sendPhotoToTelegram = async (chatId, captionHtml, imageBuffer, mimeType) =
 
   console.log("sendPhoto:", JSON.stringify(result));
   return result;
-};
+}
 
 /* ================= NEWS FILTER ================= */
 
@@ -508,7 +502,7 @@ function isGoodCryptoArticle(article) {
 
 /* ================= NEWS ================= */
 
-const getNews = async () => {
+async function getNews() {
   const query = encodeURIComponent(
     '(crypto OR cryptocurrency OR bitcoin OR ethereum OR blockchain OR "crypto market" OR ETF)'
   );
@@ -524,18 +518,16 @@ const getNews = async () => {
 
   if (!result || result.status !== "ok" || !Array.isArray(result.articles)) {
     const message =
-      result && result.message
-        ? result.message
-        : "NewsAPI returned invalid response";
-
+      result && result.message ? result.message : "NewsAPI returned invalid response";
     throw new Error(message);
   }
 
-  const normalized = result.articles
+  return result.articles
     .filter((a) => a && a.url && a.title)
     .map((a) => ({
       title: cleanupTitle(a.title || "Без заголовка"),
       description: stripHtml(a.description || ""),
+      fullText: stripHtml(a.content || a.description || ""),
       url: normalizeUrl(a.url || ""),
       publishedAt: a.publishedAt || "",
       sourceName: a.source?.name || "",
@@ -543,11 +535,9 @@ const getNews = async () => {
     }))
     .filter(isGoodCryptoArticle)
     .sort((a, b) => b.score - a.score);
+}
 
-  return normalized;
-};
-
-const getNextUniqueArticle = async () => {
+async function getNextUniqueArticle() {
   const news = await getNews();
 
   for (const article of news) {
@@ -557,9 +547,9 @@ const getNextUniqueArticle = async () => {
   }
 
   return null;
-};
+}
 
-const translate = async (text) => {
+async function translate(text) {
   const source = String(text || "").trim();
   if (!source) return "";
 
@@ -576,40 +566,33 @@ const translate = async (text) => {
     console.error("translate error:", error);
     return source;
   }
-};
+}
 
-/* ================= FORMAT ================= */
+/* ================= DRAFT BUILD ================= */
 
-const buildText = async (article) => {
+async function buildDraft(article) {
   const translatedTitle = await translate(article.title);
-  let translatedDesc = "";
+  const sourceText = article.fullText || article.description || "";
+  const translatedText = sourceText ? await translate(sourceText) : "";
 
-  if (article.description) {
-    translatedDesc = await translate(shorten(article.description, 180));
-  }
-
-  const safeTitle = escapeHtml(cleanupTitle(translatedTitle || article.title));
-  const safeDesc = escapeHtml(shorten(translatedDesc || article.description || "", 200));
-
-  if (!safeDesc) {
-    return `<b>${safeTitle}</b>`;
-  }
-
-  return `<b>${safeTitle}</b>\n\n${safeDesc}`;
-};
+  return {
+    title: cleanupTitle(translatedTitle || article.title),
+    text: stripHtml(translatedText || sourceText),
+  };
+}
 
 /* ================= SLOT ================= */
 
-async function sendDraft(options = {}) {
-  if (!currentSlot) return;
-  if (currentSlot.completed) return;
+async function createDraftForCurrentSlot() {
+  if (!currentSlot) return null;
+  if (currentSlot.completed) return null;
 
   if (currentSlot.attempts >= MAX_ATTEMPTS_PER_SLOT) {
     currentSlot.completed = true;
     markSlotProcessed(currentSlot.slotKey);
     currentSlot = null;
     currentDraft = null;
-    return;
+    return null;
   }
 
   currentSlot.attempts += 1;
@@ -623,7 +606,7 @@ async function sendDraft(options = {}) {
     markSlotProcessed(currentSlot.slotKey);
     currentSlot = null;
     currentDraft = null;
-    return;
+    return null;
   }
 
   if (!article) {
@@ -631,39 +614,85 @@ async function sendDraft(options = {}) {
     markSlotProcessed(currentSlot.slotKey);
     currentSlot = null;
     currentDraft = null;
-    return;
+    return null;
   }
 
   markSeen(article.url);
 
-  let text;
+  let draftContent;
   try {
-    text = await buildText(article);
+    draftContent = await buildDraft(article);
   } catch (error) {
-    console.error("buildText error:", error);
-    text = `<b>${escapeHtml(article.title)}</b>\n\n${escapeHtml(shorten(article.description || "", 180))}`;
+    console.error("buildDraft error:", error);
+    draftContent = {
+      title: cleanupTitle(article.title),
+      text: stripHtml(article.fullText || article.description || ""),
+    };
   }
 
   const draftId = nextDraftId();
 
-  currentSlot.pendingId = draftId;
-  currentSlot.article = article;
-  currentSlot.text = text;
-
   currentDraft = {
     id: draftId,
-    title: article.title,
+    title: draftContent.title,
     description: article.description,
-    text,
+    text: draftContent.text,
     url: article.url,
+    sourceName: article.sourceName || "",
+    publishedAt: article.publishedAt || "",
     slotKey: currentSlot.slotKey,
     createdAt: new Date().toISOString(),
     status: "pending",
   };
 
+  currentSlot.pendingId = draftId;
+  currentSlot.article = article;
+
   console.log(
     `Draft created. slot=${currentSlot.slotKey}, attempt=${currentSlot.attempts}, url=${article.url}`
   );
+
+  return currentDraft;
+}
+
+function ensureCurrentSlot() {
+  const { dateKey, timeLabel } = getKyivDateTime();
+  const key = slotKeyForTime(dateKey, timeLabel);
+
+  if (!isScheduledTime(timeLabel)) {
+    return false;
+  }
+
+  if (isSlotProcessed(key)) {
+    return false;
+  }
+
+  if (currentSlot && currentSlot.slotKey === key && !currentSlot.completed) {
+    return true;
+  }
+
+  currentSlot = {
+    slotKey: key,
+    dateKey,
+    timeLabel,
+    attempts: 0,
+    completed: false,
+    pendingId: null,
+    article: null,
+  };
+
+  return true;
+}
+
+async function ensureDraftAvailable() {
+  if (currentDraft && currentDraft.status === "pending") {
+    return currentDraft;
+  }
+
+  const hasSlot = ensureCurrentSlot();
+  if (!hasSlot) return null;
+
+  return createDraftForCurrentSlot();
 }
 
 /* ================= API ================= */
@@ -682,43 +711,33 @@ const apiServer = http.createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/") {
     return sendJson(res, 200, {
       ok: true,
-      service: "ai-telegram-bot",
-      endpoints: ["/draft/current", "/draft/test", "/draft/reject", "/draft/publish"],
+      service: "crypto-news-bot",
+      hasDraft: !!currentDraft,
+      currentSlot: currentSlot?.slotKey || null,
     });
   }
 
   if (req.method === "GET" && req.url === "/draft/current") {
-    return sendJson(res, 200, {
-      ok: true,
-      draft: currentDraft,
-    });
-  }
-
-  if (req.method === "GET" && req.url === "/draft/test") {
     try {
-      currentSlot = {
-        slotKey: "manual_test_slot",
-        dateKey: "manual_test_date",
-        timeLabel: "TEST",
-        attempts: 0,
-        completed: false,
-        pendingId: null,
-        article: null,
-        text: null,
-      };
+      const draft = await ensureDraftAvailable();
 
-      await sendDraft();
+      if (!draft) {
+        return sendJson(res, 200, {
+          ok: true,
+          draft: null,
+          message: "Наразі немає активної чернетки",
+        });
+      }
 
       return sendJson(res, 200, {
         ok: true,
-        draft: currentDraft,
+        draft,
       });
     } catch (error) {
-      console.error("GET /draft/test error:", error);
-
+      console.error("/draft/current error:", error);
       return sendJson(res, 500, {
         ok: false,
-        error: error.message || "Failed to create test draft",
+        error: "Не вдалося отримати чернетку",
       });
     }
   }
@@ -726,39 +745,43 @@ const apiServer = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/draft/reject") {
     try {
       if (!currentSlot || currentSlot.completed) {
-        currentSlot = {
-          slotKey: "manual_reject_slot",
-          dateKey: "manual_reject_date",
-          timeLabel: "MANUAL",
-          attempts: 0,
-          completed: false,
-          pendingId: null,
-          article: null,
-          text: null,
-        };
+        const draft = await ensureDraftAvailable();
+
+        if (!draft) {
+          return sendJson(res, 200, {
+            ok: false,
+            message: "Немає активної чернетки для заміни",
+          });
+        }
+
+        return sendJson(res, 200, {
+          ok: true,
+          message: "Нова чернетка створена",
+          draft,
+        });
       }
 
-      if (currentDraft) {
-        currentDraft.status = "rejected";
-        currentDraft.rejectedAt = new Date().toISOString();
+      currentDraft = null;
+
+      const draft = await createDraftForCurrentSlot();
+
+      if (!draft) {
+        return sendJson(res, 200, {
+          ok: false,
+          message: "Інших новин для цього слоту не знайдено",
+        });
       }
-
-      currentSlot.pendingId = null;
-      currentSlot.article = null;
-      currentSlot.text = null;
-
-      await sendDraft({ silent: true });
 
       return sendJson(res, 200, {
         ok: true,
-        message: "New draft created",
-        draft: currentDraft,
+        message: "Нова чернетка створена",
+        draft,
       });
     } catch (error) {
-      console.error("POST /draft/reject error:", error);
+      console.error("/draft/reject error:", error);
       return sendJson(res, 500, {
         ok: false,
-        message: error.message || "Reject failed",
+        error: "Не вдалося відхилити чернетку",
       });
     }
   }
@@ -767,96 +790,62 @@ const apiServer = http.createServer(async (req, res) => {
     try {
       const body = await parseRequestBody(req);
 
-      if (!currentDraft) {
+      const title = cleanupTitle(body.title || currentDraft?.title || "");
+      const text = stripHtml(body.text || currentDraft?.text || "");
+      const imageBase64 = sanitizeBase64(body.imageBase64 || "");
+      const imageMimeType = String(body.imageMimeType || "image/jpeg");
+
+      if (!title && !text) {
         return sendJson(res, 400, {
           ok: false,
-          error: "No active draft",
+          error: "Порожній текст публікації",
         });
       }
 
-      const finalTitle =
-        typeof body.title === "string"
-          ? cleanupTitle(body.title)
-          : cleanupTitle(currentDraft.title || "");
+      const sourceUrl = currentDraft?.url || "";
+      const html = buildTelegramHtml(title, text, sourceUrl);
 
-      const finalText =
-        typeof body.text === "string"
-          ? stripHtml(body.text)
-          : stripHtml(currentDraft.description || "");
-
-      const messageHtml = buildPostHtml(finalTitle, finalText);
-
-      if (!messageHtml) {
-        return sendJson(res, 400, {
-          ok: false,
-          error: "Empty post",
-        });
-      }
-
-      const imageBase64 = sanitizeBase64(body.imageBase64);
-      const imageMimeType = String(body.imageMimeType || "image/jpeg").trim();
+      let tgResult;
 
       if (imageBase64) {
-        let imageBuffer;
-
-        try {
-          imageBuffer = Buffer.from(imageBase64, "base64");
-        } catch {
-          return sendJson(res, 400, {
-            ok: false,
-            error: "Invalid imageBase64",
-          });
-        }
-
-        if (!imageBuffer || !imageBuffer.length) {
-          return sendJson(res, 400, {
-            ok: false,
-            error: "Empty image",
-          });
-        }
-
-        const photoResult = await sendPhotoToTelegram(
+        const imageBuffer = Buffer.from(imageBase64, "base64");
+        tgResult = await sendPhotoToTelegram(
           CHANNEL_CHAT_ID,
-          messageHtml,
+          html,
           imageBuffer,
           imageMimeType
         );
-
-        if (!photoResult.ok) {
-          return sendJson(res, 500, {
-            ok: false,
-            error: photoResult.description || "Telegram sendPhoto failed",
-          });
-        }
       } else {
-        const messageResult = await sendMessage(CHANNEL_CHAT_ID, messageHtml);
-
-        if (!messageResult.ok) {
-          return sendJson(res, 500, {
-            ok: false,
-            error: messageResult.description || "Telegram sendMessage failed",
-          });
-        }
+        tgResult = await sendMessage(CHANNEL_CHAT_ID, html);
       }
 
-      currentDraft.status = "published";
-      currentDraft.publishedAt = new Date().toISOString();
+      if (!tgResult || !tgResult.ok) {
+        return sendJson(res, 500, {
+          ok: false,
+          error: tgResult?.description || "Telegram publish failed",
+        });
+      }
 
-      if (currentSlot) {
-        currentSlot.completed = true;
+      if (currentSlot?.slotKey) {
         markSlotProcessed(currentSlot.slotKey);
-        currentSlot = null;
       }
+
+      if (currentDraft) {
+        currentDraft.status = "published";
+      }
+
+      currentDraft = null;
+      currentSlot = null;
 
       return sendJson(res, 200, {
         ok: true,
-        message: "Published",
+        message: "Опубліковано",
       });
     } catch (error) {
-      console.error("POST /draft/publish error:", error);
+      console.error("/draft/publish error:", error);
       return sendJson(res, 500, {
         ok: false,
-        error: error.message || "Publish failed",
+        error: error?.message || "Помилка публікації",
       });
     }
   }
@@ -869,70 +858,50 @@ const apiServer = http.createServer(async (req, res) => {
 
 /* ================= SCHEDULER ================= */
 
-async function scheduler() {
-  const { dateKey, timeLabel } = getKyivDateTime();
-  const slotKey = `${dateKey}_${timeLabel}`;
+function tickScheduler() {
+  try {
+    if (currentDraft && currentDraft.status === "pending") {
+      return;
+    }
 
-  console.log("scheduler tick:", { dateKey, timeLabel });
+    const { dateKey, timeLabel } = getKyivDateTime();
+    const key = slotKeyForTime(dateKey, timeLabel);
 
-  if (!SCHEDULE_TIMES.includes(timeLabel)) {
-    return;
+    if (!isScheduledTime(timeLabel)) {
+      return;
+    }
+
+    if (isSlotProcessed(key)) {
+      return;
+    }
+
+    if (!currentSlot || currentSlot.slotKey !== key) {
+      currentSlot = {
+        slotKey: key,
+        dateKey,
+        timeLabel,
+        attempts: 0,
+        completed: false,
+        pendingId: null,
+        article: null,
+      };
+    }
+
+    if (!currentDraft) {
+      createDraftForCurrentSlot().catch((error) => {
+        console.error("scheduler createDraftForCurrentSlot error:", error);
+      });
+    }
+  } catch (error) {
+    console.error("tickScheduler error:", error);
   }
-
-  if (isSlotProcessed(slotKey)) {
-    return;
-  }
-
-  if (currentSlot && !currentSlot.completed) {
-    console.log("Slot already active:", currentSlot.slotKey);
-    return;
-  }
-
-  currentSlot = {
-    slotKey,
-    dateKey,
-    timeLabel,
-    attempts: 0,
-    completed: false,
-    pendingId: null,
-    article: null,
-    text: null,
-  };
-
-  await sendDraft();
 }
 
 /* ================= START ================= */
 
-async function bootstrap() {
-  if (!TOKEN) {
-    throw new Error("TELEGRAM_TOKEN is not set");
-  }
-
-  if (!NEWS_API_KEY) {
-    throw new Error("NEWS_API_KEY is not set");
-  }
-
-  console.log("Server started");
-  console.log("Schedule:", SCHEDULE_TIMES.join(", "));
-  console.log("Timezone:", TIMEZONE);
-
-  apiServer.listen(PORT, () => {
-    console.log(`API server started on port ${PORT}`);
-  });
-
-  setInterval(() => {
-    scheduler().catch((error) => {
-      console.error("scheduler error:", error);
-    });
-  }, 30000);
-
-  scheduler().catch((error) => {
-    console.error("initial scheduler error:", error);
-  });
-}
-
-bootstrap().catch((error) => {
-  console.error("bootstrap error:", error);
-  process.exit(1);
+apiServer.listen(PORT, () => {
+  console.log(`API server listening on port ${PORT}`);
 });
+
+setInterval(tickScheduler, 30 * 1000);
+tickScheduler();
