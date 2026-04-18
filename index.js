@@ -13,7 +13,7 @@ const PORT = Number(process.env.PORT || 3000);
 const CHANNEL_CHAT_ID = "-1003675505328";
 
 const TIMEZONE = "Europe/Kyiv";
-const SCHEDULE_TIMES = ["11:00", "14:00", "14:54"];
+const SCHEDULE_TIMES = ["11:00", "14:00", "15:08"];
 
 const MAX_ATTEMPTS_PER_SLOT = 5;
 const NEWS_PAGE_SIZE = 30;
@@ -152,10 +152,11 @@ function stripHtml(text) {
 
 function cleanupArticleText(text) {
   return stripHtml(text)
-    .replace(/\s*\[\+\d+\s+chars\]\s*$/i, "")
-    .replace(/\s*\+\d+\s+chars\s*$/i, "")
-    .replace(/\s*Continue reading.*$/i, "")
-    .replace(/\s*Read more.*$/i, "")
+    .replace(/\[\+\d+\s*chars\]/gi, "")
+    .replace(/\[\+\d+\s*символ[^\]]*\]/gi, "")
+    .replace(/\+\d+\s*chars/gi, "")
+    .replace(/Continue reading.*/gi, "")
+    .replace(/Read more.*/gi, "")
     .trim();
 }
 
@@ -574,11 +575,7 @@ function extractWithReadability(html, url) {
 
     if (!article) return "";
 
-    const combined = [article.title, article.excerpt, article.textContent]
-      .filter(Boolean)
-      .join("\n\n");
-
-    return cleanupArticleText(combined);
+    return cleanupArticleText(article.textContent || "");
   } catch (error) {
     console.error("extractWithReadability error:", error);
     return "";
@@ -704,7 +701,66 @@ async function getNextUniqueArticle() {
   return null;
 }
 
-async function translate(text) {
+/* ================= TRANSLATE ================= */
+
+function splitTextForTranslation(text, maxLength = 450) {
+  const source = String(text || "").trim();
+  if (!source) return [];
+
+  const paragraphs = source.split(/\n\s*\n/).filter(Boolean);
+  const chunks = [];
+  let current = "";
+
+  for (const paragraph of paragraphs) {
+    const cleanParagraph = paragraph.trim();
+    if (!cleanParagraph) continue;
+
+    if (cleanParagraph.length > maxLength) {
+      const sentences = cleanParagraph.split(/(?<=[.!?])\s+/);
+
+      for (const sentence of sentences) {
+        const cleanSentence = sentence.trim();
+        if (!cleanSentence) continue;
+
+        if ((current + " " + cleanSentence).trim().length <= maxLength) {
+          current = `${current} ${cleanSentence}`.trim();
+        } else {
+          if (current) {
+            chunks.push(current);
+          }
+
+          if (cleanSentence.length <= maxLength) {
+            current = cleanSentence;
+          } else {
+            for (let i = 0; i < cleanSentence.length; i += maxLength) {
+              chunks.push(cleanSentence.slice(i, i + maxLength));
+            }
+            current = "";
+          }
+        }
+      }
+    } else {
+      const candidate = current ? `${current}\n\n${cleanParagraph}` : cleanParagraph;
+
+      if (candidate.length <= maxLength) {
+        current = candidate;
+      } else {
+        if (current) {
+          chunks.push(current);
+        }
+        current = cleanParagraph;
+      }
+    }
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks;
+}
+
+async function translateChunk(text) {
   const source = String(text || "").trim();
   if (!source) return "";
 
@@ -716,11 +772,31 @@ async function translate(text) {
       "GET"
     );
 
-    return stripHtml(res?.responseData?.translatedText || source);
+    const translated = res?.responseData?.translatedText;
+    return stripHtml(translated || source);
   } catch (error) {
-    console.error("translate error:", error);
+    console.error("translateChunk error:", error);
     return source;
   }
+}
+
+async function translate(text) {
+  const source = String(text || "").trim();
+  if (!source) return "";
+
+  if (source.length <= 450) {
+    return translateChunk(source);
+  }
+
+  const chunks = splitTextForTranslation(source, 450);
+  const translatedChunks = [];
+
+  for (const chunk of chunks) {
+    const translated = await translateChunk(chunk);
+    translatedChunks.push(translated);
+  }
+
+  return translatedChunks.join("\n\n").trim();
 }
 
 /* ================= DRAFT BUILD ================= */
@@ -731,7 +807,7 @@ async function buildDraft(article) {
   let sourceText = await fetchFullArticleText(article.url);
 
   if (!sourceText || sourceText.length < 300) {
-    sourceText = article.contentPreview || article.description || "";
+    sourceText = article.description || article.contentPreview || "";
   }
 
   const translatedText = sourceText ? await translate(sourceText) : "";
@@ -787,9 +863,7 @@ async function createDraftForCurrentSlot() {
     console.error("buildDraft error:", error);
     draftContent = {
       title: cleanupTitle(article.title),
-      text: cleanupArticleText(
-        article.contentPreview || article.description || ""
-      ),
+      text: cleanupArticleText(article.description || article.contentPreview || ""),
     };
   }
 
