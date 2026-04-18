@@ -147,6 +147,25 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
+function decodeHtmlEntities(text) {
+  return String(text || "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&quot;/gi, "\"")
+    .replace(/&#39;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&")
+    .replace(/&#(\d+);/g, (_, code) => {
+      const num = Number(code);
+      return Number.isFinite(num) ? String.fromCharCode(num) : "";
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+      const num = parseInt(hex, 16);
+      return Number.isFinite(num) ? String.fromCharCode(num) : "";
+    });
+}
+
 function stripHtml(text) {
   return String(text || "")
     .replace(/<[^>]*>/g, " ")
@@ -246,6 +265,14 @@ function buildTelegramHtml(title, text, sourceUrl = "") {
   }
 
   return result.trim();
+}
+
+function getTelegramTextLength(html) {
+  const visibleText = decodeHtmlEntities(
+    String(html || "").replace(/<[^>]*>/g, "")
+  ).replace(/\s+/g, " ").trim();
+
+  return visibleText.length;
 }
 
 function getExtensionFromMime(mimeType) {
@@ -841,8 +868,9 @@ async function processScheduledSlot() {
       if (!draft) break;
 
       const html = buildTelegramHtml(draft.title, draft.text, draft.url);
+      const visibleLength = getTelegramTextLength(html);
 
-      if (html.length > 4096) {
+      if (visibleLength > 4096) {
         markSeen(draft.url);
         currentDraft = null;
         continue;
@@ -954,16 +982,17 @@ const server = http.createServer(async (req, res) => {
       }
 
       const html = buildTelegramHtml(title, text, sourceUrl);
+      const visibleLength = getTelegramTextLength(html);
 
       let result;
 
       if (imageBase64) {
         const imageBuffer = Buffer.from(imageBase64, "base64");
 
-        if (html.length > 1024) {
+        if (visibleLength > 1024) {
           return sendJson(res, 400, {
             ok: false,
-            message: "Caption перевищує 1024 символи",
+            message: `Caption перевищує 1024 символи (${visibleLength})`,
           });
         }
 
@@ -974,10 +1003,10 @@ const server = http.createServer(async (req, res) => {
           imageMimeType
         );
       } else {
-        if (html.length > 4096) {
+        if (visibleLength > 4096) {
           return sendJson(res, 400, {
             ok: false,
-            message: "Текст перевищує 4096 символів",
+            message: `Текст перевищує 4096 символів (${visibleLength})`,
           });
         }
 
