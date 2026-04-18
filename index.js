@@ -865,11 +865,12 @@ async function processScheduledSlot() {
   }
 }
 
-setInterval(() => {
-  processScheduledSlot().catch((error) => {
-    console.error("schedule interval error:", error);
-  });
-}, 30 * 1000);
+// АВТОПОСТИНГ ВИМКНЕНО
+// setInterval(() => {
+//   processScheduledSlot().catch((error) => {
+//     console.error("schedule interval error:", error);
+//   });
+// }, 30 * 1000);
 
 /* ================= SERVER ================= */
 
